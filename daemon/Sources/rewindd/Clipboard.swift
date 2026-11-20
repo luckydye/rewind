@@ -18,6 +18,45 @@ enum ClipboardError: Error, CustomStringConvertible {
 }
 
 enum Clipboard {
+    /// Puts a file reference on the pasteboard, which is what Finder, Messages
+    /// and Slack paste as the video itself.
+    @MainActor
+    static func copyFile(_ url: URL) throws {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.writeObjects([url as NSURL]) else {
+            throw ClipboardError.writeFailed
+        }
+    }
+
+    /// Copied clips live in Caches rather than ~/Movies/Rewind: they are only
+    /// there to be pasted, so they should not clutter the clip library. The
+    /// file has to outlive the copy for the paste to work, so copies older than
+    /// a day are removed here instead of immediately.
+    static func newCachedClipURL() -> URL {
+        let directory = FileManager.default
+            .urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Rewind", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
+        let existing = (try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        )) ?? []
+        for file in existing where file.pathExtension == "mp4" {
+            let modified = try? file.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate
+            if let modified, modified < cutoff {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        return directory.appendingPathComponent("Rewind \(formatter.string(from: Date())).mp4")
+    }
+
     /// Puts a decoded frame on the general pasteboard as PNG and TIFF. PNG is
     /// what browsers and chat apps take; TIFF is what Preview and older AppKit
     /// apps paste.

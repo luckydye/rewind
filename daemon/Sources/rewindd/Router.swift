@@ -34,6 +34,18 @@ enum Router {
                 )
                 return .json(Response(ok: true, state: await recorder.state(), clip: clip))
 
+            case .copyClip:
+                guard let range = request.range, range.to >= 0, range.duration > 0 else {
+                    return .json(.failure("copyClip needs a range with from > to >= 0"))
+                }
+                let clip = try await recorder.export(
+                    from: range.from,
+                    to: range.to,
+                    path: Clipboard.newCachedClipURL().path
+                )
+                try await Clipboard.copyFile(URL(fileURLWithPath: clip.path))
+                return .json(Response(ok: true, state: await recorder.state(), clip: clip))
+
             case .openUI:
                 launcher.open()
                 return .json(Response(ok: true))

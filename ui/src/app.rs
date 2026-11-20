@@ -343,6 +343,16 @@ impl Rewind {
     // MARK: - Export
 
     fn export(&mut self, cx: &mut Context<Self>) {
+        self.render_clip(false, cx);
+    }
+
+    fn copy_clip(&mut self, cx: &mut Context<Self>) {
+        self.render_clip(true, cx);
+    }
+
+    /// Export to ~/Movies/Rewind, or with `copy` render to the cache and put
+    /// the file on the clipboard. Both are the same render on the daemon side.
+    fn render_clip(&mut self, copy: bool, cx: &mut Context<Self>) {
         if self.exporting {
             return;
         }
@@ -366,7 +376,11 @@ impl Rewind {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let mut request = Request::new(Command::ExportClip);
+                    let mut request = Request::new(if copy {
+                        Command::CopyClip
+                    } else {
+                        Command::ExportClip
+                    });
                     request.range = Some(range);
                     ipc::call(&client, request)
                 })
@@ -376,6 +390,11 @@ impl Rewind {
                 view.exporting = false;
                 view.status = Some(match result {
                     Ok(response) => match response.clip {
+                        Some(clip) if copy => Status::Info(format!(
+                            "Copied {:.1}s clip · {:.1} MB",
+                            clip.duration,
+                            clip.bytes as f64 / 1_048_576.0
+                        )),
                         Some(clip) => {
                             view.last_clip = Some(clip.path);
                             Status::Info(format!(
@@ -488,6 +507,7 @@ impl Rewind {
     /// | I / O          | set range start / end at the playhead  |
     /// | A              | select the whole buffer                |
     /// | Return         | export                                 |
+    /// | ⌘C             | copy the range as a video file         |
     /// | Esc            | close                                  |
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let modifiers = &event.keystroke.modifiers;
@@ -498,6 +518,7 @@ impl Rewind {
             "escape" => self.close(cx),
             "space" => self.toggle_play(cx),
             "enter" => self.export(cx),
+            "c" if modifiers.platform => self.copy_clip(cx),
             "left" if modifiers.alt => self.shift_range(1.0, cx),
             "right" if modifiers.alt => self.shift_range(-1.0, cx),
             "left" => self.nudge(step, cx),
@@ -813,10 +834,15 @@ impl Rewind {
                 label_button("Reveal").on_mouse_down(MouseButton::Left, move |_, _, _| reveal(&path)),
             );
         }
-        secondary = secondary.child(label_button("Reset").on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|view, _: &MouseDownEvent, _window, cx| view.reset_range(cx)),
-        ));
+        secondary = secondary
+            .child(label_button("Reset").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.reset_range(cx)),
+            ))
+            .child(label_button("Copy").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.copy_clip(cx)),
+            ));
 
         let right = div()
             .absolute()

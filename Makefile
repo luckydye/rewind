@@ -9,6 +9,9 @@ BUNDLE := dist/Rewind.app
 # have to sit next to each other in development too.
 build: ui
 	cd $(DAEMON) && swift build
+	@# Remove first: copying over an existing executable keeps its inode, and the
+	@# kernel then kills the new binary on a stale code-signature cache (exit 137).
+	@rm -f $(DEBUG)/rewind-ui
 	@cp ui/target/debug/rewind-ui $(DEBUG)/rewind-ui
 
 ui:

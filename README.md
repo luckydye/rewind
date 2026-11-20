@@ -166,6 +166,7 @@ inside the overlay as status pills and a side panel, which was decoration.
 | I / O | set range start / end at the playhead |
 | A | select the whole buffer |
 | Return | export |
+| ⌘C / Copy | copy the range to the clipboard as a video file |
 | Escape | copy the frame under the playhead to the clipboard, then close |
 
 Export writes to `~/Movies/Rewind/`; the bar then offers a Reveal button rather
