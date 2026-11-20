@@ -47,7 +47,13 @@ bundle: ui-release
 	@cp $(RELEASE)/rewindd $(BUNDLE)/Contents/MacOS/Rewind
 	@cp ui/target/release/rewind-ui $(BUNDLE)/Contents/MacOS/rewind-ui
 	@cp resources/Info.plist $(BUNDLE)/Contents/Info.plist
-	@codesign --force --sign "$(SIGN_IDENTITY)" $(BUNDLE)
+	@codesign --force --sign "$(SIGN_IDENTITY)" $(BUNDLE) || { \
+		echo ""; \
+		echo "Signing failed. 'errSecInternalComponent' means codesign could not unlock"; \
+		echo "the identity's key in this session: run 'make install' from your own"; \
+		echo "terminal and choose 'Always Allow' when it asks for keychain access."; \
+		echo "Ad-hoc instead: make install SIGN_IDENTITY=-"; \
+		exit 1; }
 	@echo "built $(BUNDLE)"
 
 signing-identity:
