@@ -73,6 +73,13 @@ final class FrameRing {
             start = index
             break
         }
+
+        // Asking for the whole buffer lands on the oldest frame in the ring,
+        // which eviction has usually left mid-GOP. There is no keyframe at or
+        // before it, so cut forward to the first one instead of failing.
+        if start == nil {
+            start = frames.firstIndex { $0.isKeyframe }
+        }
         guard let start else { throw FrameRingError.noKeyframeAlignment }
 
         let end = frames.lastIndex {
