@@ -47,6 +47,8 @@ const TEXT: u32 = 0xE9E9EDFF;
 const MUTED: u32 = 0x8A8A93FF;
 const ACCENT: u32 = 0x2F7CF6FF;
 const ACCENT_SOFT: u32 = 0x2F7CF64D;
+const DANGER: u32 = 0xFF5A4DFF;
+const PENDING: u32 = 0xF0A030FF;
 const TRACK: u32 = 0xFFFFFF1A;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -515,6 +517,14 @@ impl Render for Rewind {
 
 impl Rewind {
     fn status_pill(&self) -> AnyElement {
+        // The pill doubles as the only place export results and errors show up,
+        // so it reports state before it reports the capture source.
+        let (label, colour, dot) = match &self.status {
+            Some(Status::Info(text)) => (text.clone(), rgba(TEXT), PENDING),
+            Some(Status::Error(text)) => (text.clone(), rgba(DANGER), DANGER),
+            None => (self.source.clone(), rgba(MUTED), ACCENT),
+        };
+
         panel()
             .absolute()
             .left(px(MARGIN))
@@ -524,13 +534,7 @@ impl Rewind {
             .flex()
             .items_center()
             .gap(px(10.0))
-            .child(
-                div()
-                    .w(px(7.0))
-                    .h(px(7.0))
-                    .rounded_full()
-                    .bg(rgba(if self.exporting { 0xF0A030FF } else { ACCENT })),
-            )
+            .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(rgba(dot)))
             .child(
                 div()
                     .text_sm()
@@ -538,12 +542,7 @@ impl Rewind {
                     .child("Rewind"),
             )
             .child(div().w(px(1.0)).h(px(14.0)).bg(rgba(BORDER)))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgba(MUTED))
-                    .child(self.source.clone()),
-            )
+            .child(div().text_sm().text_color(colour).child(label))
             .into_any_element()
     }
 
