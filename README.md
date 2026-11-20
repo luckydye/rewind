@@ -178,9 +178,9 @@ inside the overlay as status pills and a side panel, which was decoration.
 | Home / End | jump to the oldest frame / now |
 | I / O | set range start / end at the playhead |
 | A | select the whole buffer |
-| Return | export |
+| Return | copy per the "Enter copies" switch, then close |
 | ⌘C / Copy | copy the range to the clipboard as a video file |
-| Escape | copy the frame under the playhead to the clipboard, then close |
+| Escape | close without copying |
 
 The overlay is preloaded hidden when the daemon starts and stays resident, so
 the hotkey only shows a window that already exists (~70 ms instead of ~220 ms

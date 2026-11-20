@@ -891,9 +891,11 @@ impl Rewind {
         let step = if modifiers.shift { 1.0 } else { frame };
 
         match event.keystroke.key.as_str() {
-            "escape" => self.close(cx),
+            "escape" => self.hide(cx),
             "space" => self.toggle_play(cx),
-            "enter" => self.export(cx),
+            // Enter copies whatever the switch says and dismisses; Escape just
+            // dismisses.
+            "enter" => self.close(cx),
             "c" if modifiers.platform => self.copy_clip(cx),
             "left" if modifiers.alt => self.shift_range(1.0, cx),
             "right" if modifiers.alt => self.shift_range(-1.0, cx),
@@ -1032,9 +1034,10 @@ impl Render for Rewind {
         // Nothing else in the overlay is focusable, and the window can lose key
         // status when another app activates itself, which silently drops Space,
         // Enter and Escape. Re-assert focus on every frame.
-        if !self.focus.is_focused(window) {
-            window.focus(&self.focus);
-        }
+        // Focus is asserted in `show`, not here: calling `window.focus` from a
+        // render invalidates the window, which schedules another render, which
+        // focuses again — a 60 fps repaint loop that burned ~30% of a core
+        // while the overlay sat idle.
 
         let viewport = window.viewport_size();
         let width: f32 = viewport.width.into();
@@ -1300,7 +1303,7 @@ impl Rewind {
                         div()
                             .text_xs()
                             .text_color(rgba(MUTED))
-                            .child("Esc copies"),
+                            .child("Enter copies"),
                     )
                     .child(close_switch),
             )
@@ -1314,7 +1317,7 @@ impl Rewind {
             )
             .child(icon_button("✕").on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.close(cx)),
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.hide(cx)),
             ));
 
         let block_top = ROW_Y + BLOCK_INSET;
