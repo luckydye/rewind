@@ -88,6 +88,13 @@ const GROUP: u32 = 0xFFFFFF0A;
 const DANGER: u32 = 0xFF5A4DFF;
 const PENDING: u32 = 0xF0A030FF;
 
+/// What dismissing the overlay puts on the clipboard.
+#[derive(Clone, Copy, PartialEq)]
+enum CloseCopy {
+    Image,
+    Clip,
+}
+
 /// Which range frame the stage shows while dragging.
 #[derive(Clone, Copy, PartialEq)]
 enum EdgeMode {
@@ -165,6 +172,7 @@ pub struct Rewind {
     playback_clock: Option<Instant>,
     last_clip: Option<String>,
     /// A close is in flight: the frame is being copied before the overlay hides.
+    close_copy: CloseCopy,
     closing: bool,
     /// The last copy failed; the next close hides without trying again, so a
     /// dead daemon cannot trap the user in the overlay.
@@ -201,6 +209,7 @@ impl Rewind {
             status: None,
             ticker: None,
             playback_clock: None,
+            close_copy: CloseCopy::Image,
             last_clip: None,
             closing: false,
             copy_failed: false,
@@ -653,6 +662,10 @@ impl Rewind {
     /// Export to ~/Movies/Rewind, or with `copy` render to the cache and put
     /// the file on the clipboard. Both are the same render on the daemon side.
     fn render_clip(&mut self, copy: bool, cx: &mut Context<Self>) {
+        self.render_clip_then(copy, false, cx);
+    }
+
+    fn render_clip_then(&mut self, copy: bool, close_after: bool, cx: &mut Context<Self>) {
         if self.exporting {
             return;
         }
@@ -690,6 +703,23 @@ impl Rewind {
 
             this.update(cx, |view, cx| {
                 view.exporting = false;
+                if close_after {
+                    match &result {
+                        Ok(_) => {
+                            view.hide(cx);
+                            return;
+                        }
+                        Err(error) => {
+                            view.closing = false;
+                            view.copy_failed = true;
+                            view.status = Some(Status::Error(format!(
+                                "copy failed: {error} — close again to dismiss"
+                            )));
+                            cx.notify();
+                            return;
+                        }
+                    }
+                }
                 view.status = Some(match result {
                     Ok(response) => match response.clip {
                         Some(clip) if copy => Status::Info(format!(
@@ -763,6 +793,18 @@ impl Rewind {
 
         self.closing = true;
         self.stop_playback();
+
+        if self.close_copy == CloseCopy::Clip {
+            if self.selection_duration() < 0.05 {
+                self.closing = false;
+                self.status = Some(Status::Error("select at least a moment".into()));
+                cx.notify();
+                return;
+            }
+            self.render_clip_then(true, true, cx);
+            return;
+        }
+
         self.status = Some(Status::Info("copying frame…".into()));
         let seconds = self.playhead;
         let anchor = self.anchor;
@@ -1175,6 +1217,26 @@ impl Rewind {
             left = left.child(div().text_xs().text_color(status_colour).child(status_text));
         }
 
+        let close_switch = group()
+            .child(
+                segment("Image", self.close_copy == CloseCopy::Image).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                        view.close_copy = CloseCopy::Image;
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(
+                segment("Video", self.close_copy == CloseCopy::Clip).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                        view.close_copy = CloseCopy::Clip;
+                        cx.notify();
+                    }),
+                ),
+            );
+
         let mut secondary = group();
         if let Some(path) = &self.last_clip {
             let path = path.clone();
@@ -1200,6 +1262,19 @@ impl Rewind {
             .flex()
             .items_center()
             .gap(px(4.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(MUTED))
+                            .child("Esc copies"),
+                    )
+                    .child(close_switch),
+            )
             .child(secondary)
             .child(
                 group().bg(rgba(ACCENT)).child(
@@ -1472,6 +1547,22 @@ fn icon_button(glyph: &'static str) -> Div {
         .cursor_pointer()
         .hover(|style| style.bg(rgba(0xFFFFFF14)))
         .child(glyph)
+}
+
+/// One half of a two-way switch.
+fn segment(label: &'static str, active: bool) -> Div {
+    div()
+        .h(px(24.0))
+        .px(px(9.0))
+        .rounded(px(7.0))
+        .flex()
+        .items_center()
+        .text_xs()
+        .text_color(rgba(if active { TEXT } else { MUTED }))
+        .bg(rgba(if active { 0xFFFFFF1F } else { 0x00000000 }))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(0xFFFFFF14)))
+        .child(label)
 }
 
 fn label_button(label: &'static str) -> Div {
