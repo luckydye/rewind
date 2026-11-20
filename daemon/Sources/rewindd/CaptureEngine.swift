@@ -70,7 +70,12 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
             width: size.width,
             height: size.height,
             fps: config.fps,
-            bitrate: config.bitrate
+            bitrate: CaptureEngine.bitrate(
+                requested: config.bitrate,
+                width: size.width,
+                height: size.height,
+                fps: config.fps
+            )
         )
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
@@ -147,17 +152,39 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate {
         return configuration
     }
 
-    static func outputDimensions(for display: SCDisplay, maxHeight: Int) -> (width: Int, height: Int) {
-        let pixelWidth = CGDisplayPixelsWide(display.displayID)
-        let pixelHeight = CGDisplayPixelsHigh(display.displayID)
-        guard pixelWidth > 0, pixelHeight > 0, maxHeight > 0 else {
-            return (1920, 1080)
+    /// `CGDisplayPixelsWide` reports points on a Retina display, so it cannot
+    /// be used here: capturing at that size throws away half the detail in each
+    /// direction before the encoder ever sees a frame.
+    static func pixelSize(of display: SCDisplay) -> (width: Int, height: Int) {
+        if let mode = CGDisplayCopyDisplayMode(display.displayID),
+            mode.pixelWidth > 0, mode.pixelHeight > 0
+        {
+            return (mode.pixelWidth, mode.pixelHeight)
         }
-        let scale = min(1.0, Double(maxHeight) / Double(pixelHeight))
+        return (CGDisplayPixelsWide(display.displayID), CGDisplayPixelsHigh(display.displayID))
+    }
+
+    static func outputDimensions(for display: SCDisplay, maxHeight: Int) -> (width: Int, height: Int) {
+        let native = pixelSize(of: display)
+        guard native.width > 0, native.height > 0 else { return (1920, 1080) }
+        guard maxHeight > 0 else {
+            return (even(native.width), even(native.height))
+        }
+        let scale = min(1.0, Double(maxHeight) / Double(native.height))
         return (
-            even(Int((Double(pixelWidth) * scale).rounded())),
-            even(Int((Double(pixelHeight) * scale).rounded()))
+            even(Int((Double(native.width) * scale).rounded())),
+            even(Int((Double(native.height) * scale).rounded()))
         )
+    }
+
+    /// ~0.18 bits per pixel per frame. Screen content is mostly flat with
+    /// islands of very high-frequency detail (text), which is the opposite of
+    /// camera footage: it needs a far larger budget per pixel before it stops
+    /// looking compressed.
+    static func bitrate(requested: Int, width: Int, height: Int, fps: Int) -> Int {
+        guard requested <= 0 else { return requested }
+        let bits = Double(width * height * fps) * 0.18
+        return Int(min(max(bits, 8_000_000), 80_000_000))
     }
 
     private static func even(_ value: Int) -> Int {

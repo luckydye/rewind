@@ -48,9 +48,9 @@ enum Options {
           --clip <seconds>         length of the clip exported at exit (default 8)
           --export <path>          export a clip when the run ends
           --seconds <seconds>      stop after this long instead of waiting for SIGINT
-          --height <pixels>        output height; width follows the display aspect (default 1080)
+          --height <pixels>        output height; 0 = native display resolution (default 0)
           --fps <n>                capture frame rate (default 30)
-          --bitrate <bits/s>       encoder bitrate ceiling (default 5000000)
+          --bitrate <bits/s>       encoder target; 0 = derived from resolution (default 0)
           --display <index>        display index from 'rewindd list' (default 0)
           --app <bundle-id>        capture only this application instead of the whole display
           --capture-resolution     automatic | best | nominal (default automatic)

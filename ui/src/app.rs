@@ -19,6 +19,11 @@ const TIMELINE_HEIGHT: f32 = 44.0;
 const BOTTOM: f32 = 150.0;
 const HANDLE_REACH: f32 = 12.0;
 
+/// Capture is native-resolution (33 MB per frame on a 4K display). A 2K preview
+/// costs ~11 MB and about 40 ms round trip, which keeps scrubbing usable; the
+/// exported clip is full resolution either way.
+const PREVIEW_WIDTH: i64 = 2048;
+
 const SCRIM: u32 = 0x0B0B0DCC;
 const PANEL: u32 = 0x1C1C1FF2;
 const PANEL_BORDER: u32 = 0xFFFFFF1F;
@@ -188,7 +193,7 @@ impl Rewind {
                 .spawn(async move {
                     let mut request = Request::new(Command::PreviewFrame);
                     request.seconds = Some(seconds);
-                    request.width = Some(0);
+                    request.width = Some(PREVIEW_WIDTH);
                     client.send(&request)
                 })
                 .await;

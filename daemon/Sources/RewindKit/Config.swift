@@ -19,9 +19,13 @@ public struct RecorderConfig: Codable, Equatable, Sendable {
 
     public init(
         bufferSeconds: Double = 60,
-        height: Int = 1080,
+        /// Output height in pixels; 0 captures at the display's native
+        /// resolution. The display reports points, not pixels, so the native
+        /// height of a 2x screen is twice what the UI suggests.
+        height: Int = 0,
         fps: Int = 30,
-        bitrate: Int = 5_000_000,
+        /// Bits per second; 0 derives a target from resolution and frame rate.
+        bitrate: Int = 0,
         displayIndex: Int = 0,
         applicationBundleID: String? = nil,
         captureResolution: CaptureResolution = .automatic,

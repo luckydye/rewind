@@ -1,3 +1,4 @@
+import Accelerate
 import CoreMedia
 import CoreVideo
 import Foundation
@@ -192,47 +193,47 @@ final class PreviewEngine {
         return RawImage(width: width, height: height, pixels: pixels)
     }
 
+    /// vImage rather than CoreGraphics: drawing an 8 MP frame into a CGContext
+    /// costs more than transferring it at full size, which defeats the point of
+    /// scaling down. Accelerate does it in a couple of milliseconds.
     private func scaledCopy(_ buffer: CVPixelBuffer, width: Int, height: Int) throws -> RawImage {
-        var image: CGImage?
-        guard VTCreateCGImageFromCVPixelBuffer(buffer, options: nil, imageOut: &image) == noErr,
-            let image
-        else {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else {
             throw PreviewError.imageCreationFailed
         }
 
-        let scale = Double(width) / Double(image.width)
-        let scaledHeight = max(1, Int((Double(image.height) * scale).rounded()))
-        let rowBytes = width * 4
+        let sourceWidth = CVPixelBufferGetWidth(buffer)
+        let sourceHeight = CVPixelBufferGetHeight(buffer)
+        let scale = Double(width) / Double(sourceWidth)
+        let scaledHeight = max(1, Int((Double(sourceHeight) * scale).rounded()))
+        let destinationRow = width * 4
 
-        // Drawing into an explicit buffer keeps rows tightly packed; the
-        // CGImage data provider is free to pad them.
-        let storage = UnsafeMutableRawPointer.allocate(
-            byteCount: rowBytes * scaledHeight,
-            alignment: 64
+        var pixels = Data(count: destinationRow * scaledHeight)
+        var source = vImage_Buffer(
+            data: base,
+            height: vImagePixelCount(sourceHeight),
+            width: vImagePixelCount(sourceWidth),
+            rowBytes: CVPixelBufferGetBytesPerRow(buffer)
         )
-        defer { storage.deallocate() }
 
-        guard
-            let context = CGContext(
-                data: storage,
-                width: width,
-                height: scaledHeight,
-                bitsPerComponent: 8,
-                bytesPerRow: rowBytes,
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
-                    | CGBitmapInfo.byteOrder32Little.rawValue
+        let error: vImage_Error = pixels.withUnsafeMutableBytes { raw in
+            var destination = vImage_Buffer(
+                data: raw.baseAddress,
+                height: vImagePixelCount(scaledHeight),
+                width: vImagePixelCount(width),
+                rowBytes: destinationRow
             )
-        else {
-            throw PreviewError.imageCreationFailed
+            return vImageScale_ARGB8888(
+                &source,
+                &destination,
+                nil,
+                vImage_Flags(kvImageHighQualityResampling)
+            )
         }
-        context.interpolationQuality = .high
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: scaledHeight))
+        guard error == kvImageNoError else { throw PreviewError.imageCreationFailed }
 
-        return RawImage(
-            width: width,
-            height: scaledHeight,
-            pixels: Data(bytes: storage, count: rowBytes * scaledHeight)
-        )
+        return RawImage(width: width, height: scaledHeight, pixels: pixels)
     }
 }

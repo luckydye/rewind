@@ -51,10 +51,36 @@ into your process. This pipeline does not:
   content), so there are no continuous disk writes.
 - Export re-encodes nothing: the clip is cut at a keyframe and muxed as-is.
 
+### Capture quality
+
+Two settings decide whether the export is readable, and both were wrong at
+first:
+
+- **Resolution.** `CGDisplayPixelsWide` returns *points* on a Retina display,
+  so capturing "1080p" from a 2x screen meant 1662×1080 out of a 3600×2338
+  display — under half the detail per axis, lost before the encoder saw a
+  frame. Capture now uses `CGDisplayMode.pixelWidth/Height`, i.e. native.
+- **Bitrate.** The encoder was capped at 5 Mbit/s and, on top of that, a
+  `DataRateLimits` ceiling close to its target made VT undershoot. Screen
+  content is mostly flat with islands of very high-frequency detail (text),
+  which needs far more bits per pixel than camera footage. The target is now
+  0.18 bits per pixel per frame (~45 Mbit/s at 4K30) with no hard ceiling;
+  the ring's byte limit bounds memory instead.
+
+Worst-case synthetic content at 4K30 went from ~1.4 to 36.9 Mbit/s. A static
+desktop still spends only a few Mbit/s, which is correct — nothing changed.
+The catch is memory: ~280 MB for a full 60 s buffer of the worst case, and
+proportionally less in practice. `--height 1080 --bitrate 5000000` restores
+the old, lighter profile.
+
+The overlay previews at 2K rather than native, because a native 4K frame is
+33 MB and takes ~50 ms per round trip; the exported clip is unaffected.
+
 ### Measured
 
-`scripts/measure.sh`, 36 s per case, built-in display (1800×1169), `debug`
-build, CPU and energy impact sampled from `top`:
+`scripts/measure.sh`, 36 s per case, forced to 1080p (`--height 1080`), `debug`
+build, CPU and energy impact sampled from `top`. Native 4K capture is ~4× the
+pixels, so expect more than these numbers:
 
 | case | CPU % | energy | frames | bitrate |
 |---|---|---|---|---|
@@ -242,9 +268,9 @@ rewindd run --seconds 10 --stats 3 --clip 5 --export /tmp/clip.mp4
 |---|---|---|
 | `--buffer` | 60 | rolling buffer length in seconds |
 | `--clip` | 8 | length of the clip exported at exit |
-| `--height` | 1080 | output height, width follows display aspect |
+| `--height` | 0 | output height; 0 captures at the display's native resolution |
 | `--fps` | 30 | capture frame rate |
-| `--bitrate` | 5000000 | encoder ceiling, bit/s |
+| `--bitrate` | 0 | encoder target in bit/s; 0 derives 0.18 bits/pixel/frame |
 | `--display` | 0 | index from `rewindd list` |
 | `--app` | — | bundle identifier, filters to one application |
 | `--capture-resolution` | automatic | `automatic` / `best` / `nominal` |

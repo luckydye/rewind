@@ -88,8 +88,12 @@ final class VideoEncoder {
         // up cutting at a keyframe from a minute ago. Keyframes are therefore
         // forced from the presentation timestamp instead.
         lastKeyframeTime = nil
-        // A ceiling rather than a target: static screens cost nothing extra.
-        try set(kVTCompressionPropertyKey_DataRateLimits, [bitrate / 8, 1] as CFArray)
+        // A quality target *and* an average bitrate, but deliberately no hard
+        // DataRateLimits ceiling: VT undershoots its average target when the
+        // two are close, which reads as over-compression. The ring's byte limit
+        // is what bounds memory instead.
+        try set(kVTCompressionPropertyKey_Quality, 0.85 as CFNumber)
+        try set(kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber)
 
         usesHardwareAcceleration = readBool(kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder)
         VTCompressionSessionPrepareToEncodeFrames(session)
