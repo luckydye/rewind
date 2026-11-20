@@ -1,7 +1,22 @@
+import CoreGraphics
 import Foundation
+import ImageIO
 import RewindKit
+import UniformTypeIdentifiers
 
 private let client = IPCClient()
+
+private enum ClientError: Error, CustomStringConvertible {
+    case unexpectedReply
+    case missingPayload(String)
+
+    var description: String {
+        switch self {
+        case .unexpectedReply: return "rewindd sent a reply this command cannot use"
+        case .missingPayload(let field): return "rewindd sent no \(field)"
+        }
+    }
+}
 
 private func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("rewindctl: \(message)\n".utf8))
@@ -19,11 +34,16 @@ private func usage() -> Never {
           rewindctl export [--seconds N] [--out PATH]
           rewindctl config [--buffer S] [--fps N] [--height PX] [--display N]
                            [--app BUNDLE_ID | --whole-screen] [--bitrate B]
+          rewindctl preview --ago SECONDS [--width PX] [--out clip.png]
           rewindctl displays | apps
-          rewindctl preview --ago 3 [--width 960] [--count 1] [--out PATH]
         """
     )
     exit(0)
+}
+
+private func json(_ reply: Reply) throws -> Response {
+    guard case .json(let response) = reply else { throw ClientError.unexpectedReply }
+    return response
 }
 
 private func printJSON<T: Encodable & Sendable>(_ value: T) {
@@ -70,8 +90,53 @@ private func has(_ name: String, _ arguments: [String]) -> Bool {
     arguments.contains(name)
 }
 
+/// Writes the raw BGRA frame as a lossless PNG, so what you look at is exactly
+/// what the daemon decoded — no scaling, no JPEG.
+private func writePNG(_ image: RawImage, to url: URL) throws {
+    guard let provider = CGDataProvider(data: image.pixels as CFData) else {
+        throw ClientError.missingPayload("pixels")
+    }
+    let bitmapInfo = CGBitmapInfo(
+        rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue
+            | CGBitmapInfo.byteOrder32Little.rawValue
+    )
+    guard
+        let cgImage = CGImage(
+            width: image.width,
+            height: image.height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: image.width * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: bitmapInfo,
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+    else {
+        throw ClientError.missingPayload("image")
+    }
+
+    guard
+        let destination = CGImageDestinationCreateWithURL(
+            url as CFURL,
+            UTType.png.identifier as CFString,
+            1,
+            nil
+        )
+    else {
+        throw ClientError.missingPayload("destination")
+    }
+    CGImageDestinationAddImage(destination, cgImage, nil)
+    guard CGImageDestinationFinalize(destination) else {
+        throw ClientError.missingPayload("png data")
+    }
+}
+
 let arguments = Array(CommandLine.arguments.dropFirst())
 let wantsJSON = has("--json", arguments)
+
 guard let command = arguments.first, !command.hasPrefix("--") else {
     usage()
 }
@@ -79,7 +144,7 @@ guard let command = arguments.first, !command.hasPrefix("--") else {
 do {
     switch command {
     case "status":
-        let response = try client.send(Request(command: .status))
+        let response = try json(try client.send(Request(command: .status)))
         guard response.ok, let state = response.state else {
             fail(response.error ?? "unexpected response")
         }
@@ -87,22 +152,22 @@ do {
 
     case "start", "stop":
         let request = Request(command: command == "start" ? .start : .stop)
-        let response = try client.send(request)
+        let response = try json(try client.send(request))
         guard response.ok, let state = response.state else {
             fail(response.error ?? "unexpected response")
         }
         if wantsJSON { printJSON(state) } else { print(describe(state)) }
 
     case "quit":
-        let response = try client.send(Request(command: .quit))
+        let response = try json(try client.send(Request(command: .quit)))
         guard response.ok else { fail(response.error ?? "unexpected response") }
         print("rewindd is shutting down")
 
     case "export":
         let seconds = option("--seconds", arguments).flatMap(Double.init) ?? 30
         let out = option("--out", arguments)
-        let response = try client.send(
-            Request(command: .exportClip, seconds: seconds, path: out)
+        let response = try json(
+            try client.send(Request(command: .exportClip, seconds: seconds, path: out))
         )
         guard response.ok, let clip = response.clip else {
             fail(response.error ?? "unexpected response")
@@ -124,7 +189,7 @@ do {
         }
 
     case "config":
-        let current = try client.send(Request(command: .status))
+        let current = try json(try client.send(Request(command: .status)))
         guard current.ok, var config = current.state?.config else {
             fail(current.error ?? "unexpected response")
         }
@@ -145,7 +210,7 @@ do {
         if let bundleID = option("--app", arguments) { config.applicationBundleID = bundleID }
         if has("--whole-screen", arguments) { config.applicationBundleID = nil }
 
-        let response = try client.send(Request(command: .setConfig, config: config))
+        let response = try json(try client.send(Request(command: .setConfig, config: config)))
         guard response.ok, let state = response.state else {
             fail(response.error ?? "unexpected response")
         }
@@ -153,48 +218,36 @@ do {
 
     case "preview":
         let ago = option("--ago", arguments).flatMap(Double.init) ?? 0
-        let width = option("--width", arguments).flatMap(Int.init) ?? 960
-        let count = option("--count", arguments).flatMap(Int.init) ?? 1
+        let width = option("--width", arguments).flatMap(Int.init) ?? 0
         let out = option("--out", arguments)
 
         let started = Date()
-        let response = try client.send(
-            Request(
-                command: count > 1 ? .previewBatch : .previewFrame,
-                seconds: ago,
-                width: width,
-                count: count
-            )
+        let reply = try client.send(
+            Request(command: .previewFrame, seconds: ago, width: width)
         )
-        guard response.ok, let previews = response.previews, !previews.isEmpty else {
-            fail(response.error ?? "unexpected response")
-        }
         let elapsed = Date().timeIntervalSince(started)
 
-        if let out {
-            let base = URL(fileURLWithPath: out)
-            for (index, data) in previews.enumerated() {
-                let url = previews.count == 1
-                    ? base
-                    : base.deletingPathExtension()
-                        .appendingPathExtension(String(format: "%03d", index))
-                        .appendingPathExtension("jpg")
-                try data.write(to: url)
-            }
+        guard case .image(let image) = reply else {
+            let response = try json(reply)
+            fail(response.error ?? "expected an image reply")
         }
 
-        let bytes = previews.reduce(0) { $0 + $1.count }
+        if let out {
+            try writePNG(image, to: URL(fileURLWithPath: out))
+        }
         print(
             String(
-                format: "%d frame(s), %.1f KB total, %.0f ms round trip",
-                previews.count,
-                Double(bytes) / 1024,
-                elapsed * 1000
+                format: "%dx%d, %d bytes, %.0f ms round trip%@",
+                image.width,
+                image.height,
+                image.pixels.count,
+                elapsed * 1000,
+                out.map { " — \($0)" } ?? ""
             )
         )
 
     case "displays":
-        let response = try client.send(Request(command: .listDisplays))
+        let response = try json(try client.send(Request(command: .listDisplays)))
         guard response.ok, let displays = response.displays else {
             fail(response.error ?? "unexpected response")
         }
@@ -207,7 +260,7 @@ do {
         }
 
     case "apps":
-        let response = try client.send(Request(command: .listApplications))
+        let response = try json(try client.send(Request(command: .listApplications)))
         guard response.ok, let applications = response.applications else {
             fail(response.error ?? "unexpected response")
         }

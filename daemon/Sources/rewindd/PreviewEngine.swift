@@ -1,9 +1,7 @@
-import CoreGraphics
 import CoreMedia
 import CoreVideo
 import Foundation
-import ImageIO
-import UniformTypeIdentifiers
+import RewindKit
 import VideoToolbox
 
 enum PreviewError: Error, CustomStringConvertible {
@@ -12,7 +10,6 @@ enum PreviewError: Error, CustomStringConvertible {
     case sessionFailed(OSStatus)
     case decodeFailed(OSStatus)
     case imageCreationFailed
-    case encodingFailed
 
     var description: String {
         switch self {
@@ -20,13 +17,12 @@ enum PreviewError: Error, CustomStringConvertible {
         case .noFormats: return "the rolling buffer holds no frame to decode from"
         case .sessionFailed(let status): return "VTDecompressionSessionCreate failed (\(status))"
         case .decodeFailed(let status): return "VTDecompressionSessionDecodeFrame failed (\(status))"
-        case .imageCreationFailed: return "could not turn the decoded buffer into an image"
-        case .encodingFailed: return "could not encode the preview frame"
+        case .imageCreationFailed: return "could not read the decoded pixel buffer"
         }
     }
 }
 
-/// Decodes encoded samples from the ring on demand and hands back JPEGs.
+/// Decodes encoded samples from the ring on demand at full resolution.
 ///
 /// Decoder state is kept between calls: scrubbing forward costs one decode per
 /// frame, and only a backward seek inside the same GOP costs a re-decode from
@@ -37,7 +33,7 @@ final class PreviewEngine {
     private var session: VTDecompressionSession?
     private var format: CMVideoFormatDescription?
     private var decodedTime: CMTime?
-    private var decodedImage: CGImage?
+    private var decodedBuffer: CVPixelBuffer?
     private var decodedStatus: OSStatus = noErr
 
     deinit {
@@ -47,7 +43,9 @@ final class PreviewEngine {
     }
 
     /// `frames` must be ordered by presentation time and start at a keyframe.
-    func jpeg(frames: [CMSampleBuffer], index: Int, width: Int) throws -> Data {
+    /// A `width` of zero means native resolution: never downscale a preview
+    /// below the capture size, text stops being readable.
+    func frame(frames: [CMSampleBuffer], index: Int, width: Int) throws -> RawImage {
         guard !frames.isEmpty else { throw PreviewError.empty }
         let bounded = min(max(index, 0), frames.count - 1)
 
@@ -55,10 +53,8 @@ final class PreviewEngine {
         defer { lock.unlock() }
 
         try decode(frames: frames, through: bounded)
-
-        guard let image = decodedImage else { throw PreviewError.imageCreationFailed }
-        let scaled = try resized(image, width: width)
-        return try encodeJPEG(scaled)
+        guard let buffer = decodedBuffer else { throw PreviewError.imageCreationFailed }
+        return try pixels(of: buffer, width: width)
     }
 
     private func decode(frames: [CMSampleBuffer], through target: Int) throws {
@@ -75,8 +71,7 @@ final class PreviewEngine {
         if let decodedTime, let existing = frames.firstIndex(where: {
             CMTimeCompare($0.presentationTimeStamp, decodedTime) == 0
         }) {
-            let usable = existing >= startIndex && existing < target
-            if usable {
+            if existing >= startIndex && existing < target {
                 startIndex = existing + 1
             } else {
                 reset(format: description)
@@ -89,7 +84,7 @@ final class PreviewEngine {
             try decode(frame: frames[index])
         }
 
-        if decodedImage == nil {
+        if decodedBuffer == nil {
             throw PreviewError.imageCreationFailed
         }
     }
@@ -97,13 +92,12 @@ final class PreviewEngine {
     private func decode(frame: CMSampleBuffer) throws {
         guard let session else { throw PreviewError.sessionFailed(-1) }
         decodedStatus = noErr
-        let flags: VTDecodeFrameFlags = []
         var infoFlags = VTDecodeInfoFlags()
 
         let status = VTDecompressionSessionDecodeFrame(
             session,
             sampleBuffer: frame,
-            flags: flags,
+            flags: [],
             infoFlagsOut: &infoFlags,
             outputHandler: { [weak self] status, _, imageBuffer, _, _ in
                 self?.receive(status: status, imageBuffer: imageBuffer)
@@ -118,12 +112,10 @@ final class PreviewEngine {
     private func receive(status: OSStatus, imageBuffer: CVImageBuffer?) {
         decodedStatus = status
         guard status == noErr, let imageBuffer else {
-            decodedImage = nil
+            decodedBuffer = nil
             return
         }
-        var image: CGImage?
-        let result = VTCreateCGImageFromCVPixelBuffer(imageBuffer, options: nil, imageOut: &image)
-        decodedImage = result == noErr ? image : nil
+        decodedBuffer = imageBuffer
     }
 
     private func reset(format: CMVideoFormatDescription) {
@@ -132,7 +124,7 @@ final class PreviewEngine {
         }
         session = nil
         decodedTime = nil
-        decodedImage = nil
+        decodedBuffer = nil
         self.format = format
 
         let attributes: [CFString: Any] = [
@@ -153,26 +145,76 @@ final class PreviewEngine {
         session = created
     }
 
+    /// Walks backwards and stops at the first keyframe: a full scan costs one
+    /// CoreMedia attachment lookup per frame, which at 60 s of buffer and 30 fps
+    /// dominates the whole request.
     private func keyframeIndex(frames: [CMSampleBuffer], atOrBefore target: Int) -> Int {
-        var found = 0
-        for index in 0...target where frames[index].isKeyframe {
-            found = index
+        for index in stride(from: target, through: 0, by: -1) where frames[index].isKeyframe {
+            return index
         }
-        return found
+        return 0
     }
 
-    private func resized(_ image: CGImage, width: Int) throws -> CGImage {
-        guard width > 0, width < image.width else { return image }
+    // MARK: - Pixels
+
+    private func pixels(of buffer: CVPixelBuffer, width: Int) throws -> RawImage {
+        let nativeWidth = CVPixelBufferGetWidth(buffer)
+        let nativeHeight = CVPixelBufferGetHeight(buffer)
+
+        if width <= 0 || width >= nativeWidth {
+            return try tightCopy(buffer, width: nativeWidth, height: nativeHeight)
+        }
+        return try scaledCopy(buffer, width: width, height: nativeHeight)
+    }
+
+    /// Fast path: one row copy per scanline, no CoreGraphics round trip.
+    private func tightCopy(_ buffer: CVPixelBuffer, width: Int, height: Int) throws -> RawImage {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else {
+            throw PreviewError.imageCreationFailed
+        }
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        let rowBytes = width * 4
+
+        var pixels = Data(count: rowBytes * height)
+        pixels.withUnsafeMutableBytes { destination in
+            guard let out = destination.baseAddress else { return }
+            for row in 0..<height {
+                memcpy(out + row * rowBytes, base + row * stride, rowBytes)
+            }
+        }
+        return RawImage(width: width, height: height, pixels: pixels)
+    }
+
+    private func scaledCopy(_ buffer: CVPixelBuffer, width: Int, height: Int) throws -> RawImage {
+        var image: CGImage?
+        guard VTCreateCGImageFromCVPixelBuffer(buffer, options: nil, imageOut: &image) == noErr,
+            let image
+        else {
+            throw PreviewError.imageCreationFailed
+        }
+
         let scale = Double(width) / Double(image.width)
-        let height = max(1, Int((Double(image.height) * scale).rounded()))
+        let scaledHeight = max(1, Int((Double(image.height) * scale).rounded()))
+        let rowBytes = width * 4
+
+        // Drawing into an explicit buffer keeps rows tightly packed; the
+        // CGImage data provider is free to pad them.
+        let storage = UnsafeMutableRawPointer.allocate(
+            byteCount: rowBytes * scaledHeight,
+            alignment: 64
+        )
+        defer { storage.deallocate() }
 
         guard
             let context = CGContext(
-                data: nil,
+                data: storage,
                 width: width,
-                height: height,
+                height: scaledHeight,
                 bitsPerComponent: 8,
-                bytesPerRow: 0,
+                bytesPerRow: rowBytes,
                 space: CGColorSpaceCreateDeviceRGB(),
                 bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
                     | CGBitmapInfo.byteOrder32Little.rawValue
@@ -180,35 +222,13 @@ final class PreviewEngine {
         else {
             throw PreviewError.imageCreationFailed
         }
-        context.interpolationQuality = .medium
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: scaledHeight))
 
-        guard let scaled = context.makeImage() else {
-            throw PreviewError.imageCreationFailed
-        }
-        return scaled
-    }
-
-    private func encodeJPEG(_ image: CGImage) throws -> Data {
-        let data = NSMutableData()
-        guard
-            let destination = CGImageDestinationCreateWithData(
-                data as CFMutableData,
-                UTType.jpeg.identifier as CFString,
-                1,
-                nil
-            )
-        else {
-            throw PreviewError.encodingFailed
-        }
-        CGImageDestinationAddImage(
-            destination,
-            image,
-            [kCGImageDestinationLossyCompressionQuality: 0.65] as CFDictionary
+        return RawImage(
+            width: width,
+            height: scaledHeight,
+            pixels: Data(bytes: storage, count: rowBytes * scaledHeight)
         )
-        guard CGImageDestinationFinalize(destination) else {
-            throw PreviewError.encodingFailed
-        }
-        return data as Data
     }
 }

@@ -3,60 +3,52 @@ import Foundation
 import RewindKit
 
 enum Router {
-    static func handle(_ request: Request, recorder: Recorder) async -> Response {
+    static func handle(_ request: Request, recorder: Recorder) async -> Reply {
         do {
             switch request.command {
             case .status:
-                return Response(ok: true, state: await recorder.state())
+                return .json(Response(ok: true, state: await recorder.state()))
 
             case .start:
-                return Response(ok: true, state: await recorder.start())
+                return .json(Response(ok: true, state: await recorder.start()))
 
             case .stop:
-                return Response(ok: true, state: await recorder.stop())
+                return .json(Response(ok: true, state: await recorder.stop()))
 
             case .setConfig:
                 guard let config = request.config else {
-                    return .failure("setConfig requires a config")
+                    return .json(.failure("setConfig requires a config"))
                 }
-                return Response(ok: true, state: await recorder.apply(config))
+                return .json(Response(ok: true, state: await recorder.apply(config)))
 
             case .exportClip:
                 let seconds = request.seconds ?? 30
-                guard seconds > 0 else { return .failure("seconds must be positive") }
+                guard seconds > 0 else { return .json(.failure("seconds must be positive")) }
                 let clip = try await recorder.export(seconds: seconds, path: request.path)
-                return Response(ok: true, state: await recorder.state(), clip: clip)
+                return .json(Response(ok: true, state: await recorder.state(), clip: clip))
 
             case .listDisplays:
-                return Response(ok: true, displays: try await recorder.displays())
-
-            case .previewFrame:
-                let data = try await recorder.preview(
-                    secondsAgo: request.seconds ?? 0,
-                    width: request.width ?? 960
-                )
-                return Response(ok: true, previews: [data])
-
-            case .previewBatch:
-                let frames = try await recorder.previewBatch(
-                    secondsAgo: request.seconds ?? 0,
-                    count: request.count ?? 30,
-                    width: request.width ?? 960
-                )
-                return Response(ok: true, previews: frames)
+                return .json(Response(ok: true, displays: try await recorder.displays()))
 
             case .listApplications:
-                return Response(ok: true, applications: try await recorder.applications())
+                return .json(Response(ok: true, applications: try await recorder.applications()))
+
+            case .previewFrame:
+                let image = try await recorder.preview(
+                    secondsAgo: request.seconds ?? 0,
+                    width: request.width ?? 0
+                )
+                return .image(image)
 
             case .quit:
                 // Let the response reach the client before the socket goes away.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                     NSApp.terminate(nil)
                 }
-                return Response(ok: true)
+                return .json(Response(ok: true))
             }
         } catch {
-            return .failure("\(error)")
+            return .json(.failure("\(error)"))
         }
     }
 }

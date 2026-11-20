@@ -59,21 +59,19 @@ final class FrameRing {
         guard let last = frames.last else { throw FrameRingError.empty }
         let windowStart = last.presentationTimeStamp.seconds - seconds
 
-        var startIndex: Int?
-        for (index, frame) in frames.enumerated() where frame.isKeyframe {
-            if frame.presentationTimeStamp.seconds <= windowStart {
-                startIndex = index
-            } else {
-                break
-            }
-        }
+        // Find where the window begins by timestamp, then walk back to the
+        // nearest keyframe. Scanning every frame for keyframes here would cost
+        // one CoreMedia attachment lookup per frame on every preview request.
+        let boundary = frames.firstIndex {
+            $0.presentationTimeStamp.seconds > windowStart
+        } ?? frames.count - 1
 
-        // Nothing predates the window (buffer shorter than the clip) — start at
-        // the earliest keyframe we have.
-        if startIndex == nil {
-            startIndex = frames.firstIndex(where: \.isKeyframe)
+        var start: Int?
+        for index in stride(from: boundary, through: 0, by: -1) where frames[index].isKeyframe {
+            start = index
+            break
         }
-        guard let start = startIndex else { throw FrameRingError.noKeyframeAlignment }
+        guard let start else { throw FrameRingError.noKeyframeAlignment }
 
         let slice = Array(frames[start...])
         let duration = slice.last!.presentationTimeStamp.seconds

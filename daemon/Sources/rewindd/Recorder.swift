@@ -107,35 +107,21 @@ actor Recorder {
         )
     }
 
-    func preview(secondsAgo: Double, width: Int) async throws -> Data {
+    func preview(secondsAgo: Double, width: Int) async throws -> RawImage {
         guard let ring else { throw RecorderError.notRecording }
         let snapshot = try ring.snapshot(last: config.bufferSeconds)
         let index = Self.frameIndex(secondsAgo: secondsAgo, frames: snapshot.frames)
-        return try previews.jpeg(frames: snapshot.frames, index: index, width: width)
-    }
-
-    func previewBatch(secondsAgo: Double, count: Int, width: Int) async throws -> [Data] {
-        guard let ring else { throw RecorderError.notRecording }
-        let snapshot = try ring.snapshot(last: config.bufferSeconds)
-        let start = Self.frameIndex(secondsAgo: secondsAgo, frames: snapshot.frames)
-        let end = min(start + max(count, 1) - 1, snapshot.frames.count - 1)
-
-        var frames: [Data] = []
-        for index in start...end {
-            frames.append(try previews.jpeg(frames: snapshot.frames, index: index, width: width))
-        }
-        return frames
+        return try previews.frame(frames: snapshot.frames, index: index, width: width)
     }
 
     static func frameIndex(secondsAgo: Double, frames: [CMSampleBuffer]) -> Int {
         guard let last = frames.last else { return 0 }
         let target = last.presentationTimeStamp.seconds - secondsAgo
-        var found = 0
-        for (index, frame) in frames.enumerated()
-        where frame.presentationTimeStamp.seconds <= target {
-            found = index
+        for index in stride(from: frames.count - 1, through: 0, by: -1)
+        where frames[index].presentationTimeStamp.seconds <= target {
+            return index
         }
-        return found
+        return 0
     }
 
     func displays() async throws -> [DisplayInfo] {

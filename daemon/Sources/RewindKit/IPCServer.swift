@@ -24,7 +24,7 @@ public enum IPCServerError: Error, CustomStringConvertible {
 /// Unix-socket server. One request in, one response out — no subscriptions, so
 /// a UI that dies mid-request cannot leave the daemon in a half-written state.
 public final class IPCServer {
-    public typealias Handler = @Sendable (Request) async -> Response
+    public typealias Handler = @Sendable (Request) async -> Reply
 
     private let path: String
     private let handler: Handler
@@ -180,17 +180,21 @@ extension IPCServer {
                     continue
                 }
                 Task { [handler] in
-                    let response = await handler(request)
-                    self.write(response)
+                    let reply = await handler(request)
+                    self.write(reply)
                 }
             }
         }
 
-        private func write(_ response: Response) {
-            guard let payload = try? JSONEncoder().encode(response) else { return }
-            let framed = Frame.encode(payload)
+        private func write(_ reply: Reply) {
             writeQueue.async { [fd] in
-                SocketIO.writeAll(fd, framed)
+                do {
+                    try reply.writeAll(to: fd)
+                } catch {
+                    FileHandle.standardError.write(
+                        Data("rewindd: cannot write reply: \(error)\n".utf8)
+                    )
+                }
             }
         }
     }

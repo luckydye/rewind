@@ -33,7 +33,7 @@ public struct IPCClient {
         return true
     }
 
-    public func send(_ request: Request) throws -> Response {
+    public func send(_ request: Request) throws -> Reply {
         guard let fd = UnixSocket.connect(path) else {
             throw IPCError.notRunning(path)
         }
@@ -56,10 +56,11 @@ public struct IPCClient {
             }
             let frames = try decoder.append(chunk)
             guard let frame = frames.first else { continue }
-            guard let response = try? JSONDecoder().decode(Response.self, from: frame) else {
+            do {
+                return try Reply.decode(frame)
+            } catch {
                 throw IPCError.decodeFailed
             }
-            return response
         }
     }
 }

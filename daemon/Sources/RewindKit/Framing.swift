@@ -6,7 +6,7 @@ public enum FramingError: Error, CustomStringConvertible {
     public var description: String {
         switch self {
         case .frameTooLarge(let size):
-            return "IPC frame of \(size) bytes exceeds the 8 MiB limit"
+            return "IPC frame of \(size) bytes exceeds the 64 MiB limit"
         }
     }
 }
@@ -14,7 +14,8 @@ public enum FramingError: Error, CustomStringConvertible {
 /// Length-prefixed framing: big-endian UInt32 byte count followed by the
 /// payload. Trivial to mirror in Rust.
 public enum Frame {
-    public static let maximumSize = 8 * 1024 * 1024
+    /// Generous: a native-resolution BGRA frame of a 4K display is ~33 MiB.
+    public static let maximumSize = 64 * 1024 * 1024
 
     public static func encode(_ payload: Data) -> Data {
         var framed = Data(capacity: payload.count + 4)
@@ -41,7 +42,10 @@ public struct FrameDecoder {
             guard length <= Frame.maximumSize else {
                 throw FramingError.frameTooLarge(Int(length))
             }
-            guard buffer.count >= 4 + Int(length) else { break }
+            guard buffer.count >= 4 + Int(length) else {
+                buffer.reserveCapacity(4 + Int(length))
+                break
+            }
 
             let start = buffer.startIndex + 4
             frames.append(buffer.subdata(in: start..<start + Int(length)))

@@ -9,7 +9,6 @@ public enum Command: String, Codable, Sendable {
     case listDisplays
     case listApplications
     case previewFrame
-    case previewBatch
     case quit
 }
 
@@ -124,8 +123,6 @@ public struct Response: Codable, Sendable {
     public var clip: Clip?
     public var displays: [DisplayInfo]?
     public var applications: [ApplicationInfo]?
-    /// JPEG frames, base64 encoded by JSONEncoder.
-    public var previews: [Data]?
 
     public init(
         ok: Bool,
@@ -133,8 +130,7 @@ public struct Response: Codable, Sendable {
         state: State? = nil,
         clip: Clip? = nil,
         displays: [DisplayInfo]? = nil,
-        applications: [ApplicationInfo]? = nil,
-        previews: [Data]? = nil
+        applications: [ApplicationInfo]? = nil
     ) {
         self.ok = ok
         self.error = error
@@ -142,7 +138,6 @@ public struct Response: Codable, Sendable {
         self.clip = clip
         self.displays = displays
         self.applications = applications
-        self.previews = previews
     }
 
     public static func failure(_ message: String) -> Response {

@@ -64,7 +64,6 @@ pub enum Command {
     ListDisplays,
     ListApplications,
     PreviewFrame,
-    PreviewBatch,
     Quit,
 }
 
@@ -80,8 +79,6 @@ pub struct Request {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub count: Option<i64>,
 }
 
 impl Request {
@@ -92,7 +89,6 @@ impl Request {
             seconds: None,
             path: None,
             width: None,
-            count: None,
         }
     }
 }
@@ -137,5 +133,4 @@ pub struct Response {
     pub clip: Option<Clip>,
     pub displays: Option<Vec<DisplayInfo>>,
     pub applications: Option<Vec<ApplicationInfo>>,
-    pub previews: Option<Vec<String>>,
 }

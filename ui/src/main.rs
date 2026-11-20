@@ -3,9 +3,6 @@ mod protocol;
 
 use std::fs;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
-
 use protocol::{Command, Request};
 
 fn main() {
@@ -42,28 +39,27 @@ fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
         Some("preview") => {
             let ago = flag(arguments, "--ago").unwrap_or(2.0);
-            let width = flag(arguments, "--width").unwrap_or(960.0) as i64;
-            let out = option(arguments, "--out").unwrap_or_else(|| "/tmp/preview.jpg".into());
+            let width = flag(arguments, "--width").unwrap_or(0.0) as i64;
+            let out = option(arguments, "--out").unwrap_or_else(|| "/tmp/preview.bgra".into());
 
             let started = std::time::Instant::now();
             let mut request = Request::new(Command::PreviewFrame);
             request.seconds = Some(ago);
             request.width = Some(width);
-            let response = ipc::call(&client, request)?;
-            let encoded = response.previews.ok_or("no previews in response")?;
+            let reply = client.send(&request)?;
             let elapsed = started.elapsed();
 
-            let frames: Vec<Vec<u8>> = encoded
-                .iter()
-                .map(|text| STANDARD.decode(text))
-                .collect::<Result<_, _>>()?;
-
-            fs::write(&out, &frames[0])?;
+            let ipc::Reply::Image(image) = reply else {
+                return Err("expected an image reply".into());
+            };
+            fs::write(&out, &image.pixels)?;
             println!(
-                "wrote {} ({} bytes) in {:.0} ms",
-                out,
-                frames[0].len(),
-                elapsed.as_secs_f64() * 1000.0
+                "{}x{}, {} bytes BGRA, {:.0} ms round trip — wrote {}",
+                image.width,
+                image.height,
+                image.pixels.len(),
+                elapsed.as_secs_f64() * 1000.0,
+                out
             );
         }
 

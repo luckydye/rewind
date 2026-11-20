@@ -116,9 +116,10 @@ Clips default to `~/Movies/Rewind/`.
 ### Protocol
 
 Unix socket at `~/Library/Application Support/Rewind/rewindd.sock`, mode 0600.
-Frames are a big-endian `UInt32` byte count followed by UTF-8 JSON. One request
-in, one response out; there are no subscriptions, so a client that dies
-mid-request cannot leave the daemon in a half-written state.
+Frames are a big-endian `UInt32` byte count, a one-byte kind, then either UTF-8
+JSON (`kind = 0`) or a raw image (`kind = 1`). One request in, one response out;
+there are no subscriptions, so a client that dies mid-request cannot leave the
+daemon in a half-written state.
 
 ```jsonc
 // request
@@ -139,30 +140,46 @@ Commands: `status`, `start`, `stop`, `setConfig`, `exportClip`,
 
 ### Preview frames
 
-GPUI cannot decode HEVC, and shipping FFmpeg to the UI is not an option, so the
-daemon decodes and the UI receives pixels:
+GPUI cannot decode HEVC, so the daemon decodes and the UI receives pixels.
+The frame is **full resolution, lossless BGRA**, written as a binary reply —
+no downscale, no JPEG, no base64:
 
-```jsonc
-{ "command": "previewBatch", "seconds": 3.0, "count": 30, "width": 960 }
-// → "previews": [ "<base64 jpeg>", … ]
+```
+[u32 length][u8 kind = 1][u32 width][u32 height][BGRA pixels]
 ```
 
-`seconds` is an offset *backwards from now*, so a timeline can ask for a
-position without knowing absolute timestamps. JPEG (base64 in the JSON) rather
-than raw BGRA keeps a frame at ~40 KB instead of 1.6 MB, and costs nothing at
-preview resolution.
+That is deliberate. An earlier version downscaled to 960 px and JPEG-encoded
+at quality 0.65 to save bandwidth; it turned readable UI text into mush, which
+is the one thing a screen recorder must never do. At native resolution a frame
+is ~7 MB, which a unix socket moves in a few milliseconds and which is cheaper
+than JPEG encoding the same pixels.
+
+`seconds` on the request is an offset *backwards from now*, so a timeline can
+ask for a position without knowing absolute timestamps. `width` defaults to 0,
+meaning native; only pass a width if you genuinely want a smaller frame (the
+scale path is a CoreGraphics draw and is slower than shipping native, so it is
+rarely worth it).
 
 The decoder keeps its state between requests: scrubbing forward costs one
 decode per frame, and only a backward seek costs a re-decode from the keyframe.
-Measured with `testsrc2` (worst-case entropy) at 640 px wide:
+Measured at 1662×1080 on an idle-ish desktop:
 
-| | latency |
+| | round trip |
 |---|---|
-| scrub forward, 0.1 s steps | ~15 ms |
-| scrub backward, jumping GOPs | 27–50 ms |
-| 30-frame batch (1 s of video) | ~375 ms |
+| scrub forward, 0.1 s steps | 12–14 ms |
+| scrub backward, jumping GOPs | 15–20 ms |
+| first request after a cold start | ~40 ms |
 
-That is a full round trip including socket, decode, scale and JPEG encode.
+Two things made that possible, and both were worth more than the transport:
+keyframe search walks backwards instead of scanning 1800 frames calling
+`CMSampleBufferGetSampleAttachmentsArray`, and the server writes the header and
+the pixel buffer straight to the socket instead of assembling an intermediate
+`Data`.
+
+The remaining cost is the ~7 MB copy per frame. Sending the encoded HEVC and
+decoding in the UI with `videotoolbox` would cut it by roughly 3×, at the price
+of a Rust-side decoder; it is not needed at 30 fps, but it is the obvious next
+step if it ever is.
 
 ## Standalone capture
 
