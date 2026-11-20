@@ -69,6 +69,7 @@ const PREVIEW_WIDTH: i64 = 2048;
 /// The timeline strip: one thumbnail per slot, decoded from keyframes.
 const THUMBNAIL_COUNT: i64 = 16;
 const THUMBNAIL_WIDTH: i64 = 160;
+const EDGE_FRAME_WIDTH: i64 = 640;
 
 
 
@@ -119,6 +120,13 @@ pub struct Rewind {
     /// Top inset the system keeps clear (menu bar, camera housing), so the
     /// preview is never covered by the notch.
     safe_top: f32,
+    /// First and last frame of the range, shown side by side while it is being
+    /// dragged.
+    edge_frames: Option<(Arc<RenderImage>, Arc<RenderImage>)>,
+    /// One edge request in flight at a time; the latest range is remembered so
+    /// a fast drag collapses into a single follow-up.
+    edge_in_flight: bool,
+    edge_pending: Option<(f64, f64)>,
     /// Timeline strip, one per slot, oldest first.
     thumbnails: Vec<Arc<RenderImage>>,
     /// Aspect of a thumbnail, used to cover-crop it into its slot.
@@ -159,6 +167,9 @@ impl Rewind {
             fps: 30.0,
             progress: 1.0,
             safe_top: 0.0,
+            edge_frames: None,
+            edge_in_flight: false,
+            edge_pending: None,
             thumbnails: Vec::new(),
             thumbnail_aspect: 16.0 / 9.0,
             screen: None,
@@ -218,11 +229,13 @@ impl Rewind {
             .err()
             .map(|error| Status::Error(error.to_string()));
         self.frame = None;
+        self.edge_frames = None;
         self.thumbnails = Vec::new();
         self.drag = None;
         self.closing = false;
         self.copy_failed = false;
         self.request_frame(cx);
+        self.request_edge_frames(cx);
         self.fetch_thumbnails(cx);
         cx.notify();
     }
@@ -252,6 +265,59 @@ impl Rewind {
         // Full bleed until the first frame arrives; `received` starts the morph
         // so it never animates a placeholder.
         self.progress = 0.0;
+    }
+
+    /// First and last frame of the range. Coalesced like the main preview: one
+    /// request in flight, and the latest range wins.
+    fn request_edge_frames(&mut self, cx: &mut Context<Self>) {
+        let range = (self.sel_from, self.sel_to);
+        if self.edge_in_flight {
+            self.edge_pending = Some(range);
+            return;
+        }
+
+        self.edge_in_flight = true;
+        let anchor = self.anchor;
+        let width = EDGE_FRAME_WIDTH;
+        let client = self.client.clone();
+
+        cx.spawn(async move |this, cx| {
+            let reply = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut request = Request::new(Command::EdgeFrames);
+                    request.range = Some(ClipRange {
+                        from: range.0,
+                        to: range.1,
+                    });
+                    request.width = Some(width);
+                    request.anchor = anchor;
+                    client.send(&request)
+                })
+                .await;
+
+            this.update(cx, |view, cx| {
+                view.edge_in_flight = false;
+                if let Ok(Reply::Images(images)) = reply {
+                    if let (Some(first), Some(last)) = (images.first(), images.last()) {
+                        if let (Ok(first), Ok(last)) =
+                            (build_image(first.clone()), build_image(last.clone()))
+                        {
+                            view.edge_frames = Some((first, last));
+                        }
+                    }
+                }
+                if let Some(pending) = view.edge_pending.take() {
+                    view.sel_from = pending.0;
+                    view.sel_to = pending.1;
+                    view.request_edge_frames(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
     }
 
     /// The strip is fetched once per show, in one request, from keyframes.
@@ -501,6 +567,7 @@ impl Rewind {
                         if self.thumbnails.is_empty() {
                             self.fetch_thumbnails(cx);
                         }
+                        self.request_edge_frames(cx);
                     }
                     Err(message) => self.status = Some(Status::Error(message)),
                 }
@@ -813,6 +880,7 @@ impl Rewind {
     fn timeline_drag(&mut self, x: f32, left: f32, width: f32, cx: &mut Context<Self>) {
         let Some(drag) = self.drag else { return };
         let seconds = self.time_at(x, left, width);
+        let edits_range = !matches!(drag, Drag::Playhead);
 
         match drag {
             Drag::Playhead => {
@@ -830,6 +898,10 @@ impl Rewind {
                 self.sel_from = from + delta;
                 self.sel_to = to + delta;
             }
+        }
+
+        if edits_range {
+            self.request_edge_frames(cx);
         }
         cx.notify();
     }
@@ -903,7 +975,16 @@ impl Render for Rewind {
         let to_x = x_for(self.sel_to);
         let playhead_x = x_for(self.playhead);
 
-        let stage = match &self.frame {
+        // While the range is being dragged, show what it contains: its first and
+        // last frame, side by side.
+        let dragging_range = matches!(
+            self.drag,
+            Some(Drag::Range { .. }) | Some(Drag::From) | Some(Drag::To)
+        );
+        let stage = if dragging_range && self.edge_frames.is_some() {
+            self.edge_pair(stage_left, stage_top, stage_width, stage_height)
+        } else {
+            match &self.frame {
             Some(image) => div()
                 .absolute()
                 .left(px(image_left))
@@ -943,6 +1024,7 @@ impl Render for Rewind {
                 .text_color(rgba(MUTED))
                 .child("No frame")
                 .into_any_element(),
+            }
         };
 
         // Moves and releases are handled on the root, which covers the whole
@@ -1171,6 +1253,53 @@ impl Rewind {
                     ),
             )
             .into_any_element()
+    }
+
+    /// The range's first and last frame, side by side, each fitted to half the
+    /// stage.
+    fn edge_pair(&self, left: f32, top: f32, width: f32, height: f32) -> AnyElement {
+        let Some((first, last)) = &self.edge_frames else {
+            return div().into_any_element();
+        };
+
+        let half = (width - GAP) / 2.0;
+        let mut row = div()
+            .absolute()
+            .left(px(left))
+            .top(px(top))
+            .w(px(width))
+            .h(px(height));
+
+        for (slot, image) in [first.clone(), last.clone()].into_iter().enumerate() {
+            let (image_width, image_height) = fit(
+                self.frame_size.0 as f32,
+                self.frame_size.1 as f32,
+                half,
+                height,
+            );
+            let x = slot as f32 * (half + GAP) + (half - image_width) / 2.0;
+            let y = (height - image_height) / 2.0;
+
+            row = row.child(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(y))
+                    .w(px(image_width))
+                    .h(px(image_height))
+                    .rounded(px(10.0))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(rgba(BORDER))
+                    .child(
+                        img(ImageSource::Render(image.clone()))
+                            .w(px(image_width))
+                            .h(px(image_height)),
+                    ),
+            );
+        }
+
+        row.into_any_element()
     }
 
     /// Filmstrip behind the range block. Each slot is the same width, so the

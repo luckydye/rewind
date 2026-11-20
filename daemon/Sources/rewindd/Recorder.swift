@@ -108,6 +108,23 @@ actor Recorder {
         return try previews.thumbnails(frames: snapshot.frames, indices: indices, width: width)
     }
 
+    /// First and last frame of a range, for the side-by-side preview while the
+    /// range is being dragged. Both come from keyframes, like thumbnails.
+    func edgeFrames(from: Double, to: Double, width: Int, anchor: Double?) async throws -> [RawImage] {
+        guard let ring else { throw RecorderError.notRecording }
+        let snapshot = try ring.snapshot(from: .infinity, to: 0, anchor: anchor)
+        guard let last = snapshot.frames.last else { throw FrameRingError.empty }
+
+        let now = anchor ?? last.presentationTimeStamp.seconds
+        let indices = [from, to].map { secondsAgo in
+            Self.keyframeIndex(
+                atOrBefore: Self.frameIndex(at: now - secondsAgo, frames: snapshot.frames),
+                frames: snapshot.frames
+            )
+        }
+        return try previews.thumbnails(frames: snapshot.frames, indices: indices, width: width)
+    }
+
     func export(from: Double, to: Double, path: String?, anchor: Double? = nil) async throws -> Clip {
         guard let ring, let encoder else { throw RecorderError.notRecording }
         let snapshot = try ring.snapshot(from: from, to: to, anchor: anchor)

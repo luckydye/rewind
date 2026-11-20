@@ -23,6 +23,7 @@ public enum Command: String, Codable, Sendable {
     case listApplications
     case previewFrame
     case thumbnails
+    case edgeFrames
     case copyFrame
     case copyClip
     case openUI

@@ -77,6 +77,7 @@ pub enum Command {
     ListApplications,
     PreviewFrame,
     Thumbnails,
+    EdgeFrames,
     CopyFrame,
     CopyClip,
     #[serde(rename = "openUI")]

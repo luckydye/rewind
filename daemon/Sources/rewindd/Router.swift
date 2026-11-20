@@ -66,6 +66,15 @@ enum Router {
                 )
                 return .images(images)
 
+            case .edgeFrames:
+                let images = try await recorder.edgeFrames(
+                    from: request.range?.from ?? request.seconds ?? 0,
+                    to: request.range?.to ?? 0,
+                    width: request.width ?? 480,
+                    anchor: request.anchor
+                )
+                return .images(images)
+
             case .previewFrame:
                 let image = try await recorder.preview(
                     secondsAgo: request.seconds ?? 0,
