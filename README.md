@@ -153,10 +153,17 @@ inside the overlay as status pills and a side panel, which was decoration.
 
 | input | |
 |---|---|
-| drag the timeline | scrub; the preview follows (the playhead stays inside the range) |
-| drag a handle | set the export range |
-| Space | play the selection, looping |
-| ← / → | nudge the playhead |
+| drag on the ruler | seek |
+| drag the range block | move the range |
+| drag a range edge | trim |
+| Space | play / pause |
+| ← / → | one frame back / forward |
+| ⇧← / ⇧→ | one second back / forward |
+| ⌥← / ⌥→ | move the range by one second |
+| ↑ / ↓ | jump to range start / end |
+| Home / End | jump to the oldest frame / now |
+| I / O | set range start / end at the playhead |
+| A | select the whole buffer |
 | Return | export |
 | Escape | close |
 

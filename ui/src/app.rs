@@ -44,7 +44,7 @@ const ROW_H: f32 = 38.0;
 const BLOCK_INSET: f32 = 5.0;
 
 const HANDLE_REACH: f32 = 10.0;
-const BADGE_WIDTH: f32 = 58.0;
+const BADGE_WIDTH: f32 = 66.0;
 
 /// Capture is native-resolution (33 MB per frame on a 4K display). A 2K preview
 /// costs ~11 MB and about 40 ms round trip, which keeps scrubbing usable; the
@@ -86,6 +86,8 @@ pub struct Rewind {
     focus: FocusHandle,
     client: Client,
     span: f64,
+    /// Capture frame rate, so frame stepping lands on real frames.
+    fps: f64,
     playhead: f64,
     sel_from: f64,
     sel_to: f64,
@@ -119,6 +121,7 @@ impl Rewind {
             .map(|state| state.available_seconds.max(0.5))
             .unwrap_or(1.0);
         let sel_from = span.min(10.0);
+        let fps = state.map(|state| state.config.fps as f64).unwrap_or(30.0).max(1.0);
         let status = response
             .as_ref()
             .err()
@@ -128,6 +131,7 @@ impl Rewind {
             focus: cx.focus_handle(),
             client,
             span,
+            fps,
             playhead: sel_from,
             sel_from,
             sel_to: 0.0,
@@ -382,19 +386,96 @@ impl Rewind {
 
     // MARK: - Input
 
+    /// Editing-tool conventions. Times are seconds *ago*, so moving left on
+    /// the timeline is a positive delta.
+    ///
+    /// | key            | action                                 |
+    /// |----------------|----------------------------------------|
+    /// | Space          | play / pause                           |
+    /// | ← / →          | one frame back / forward               |
+    /// | ⇧← / ⇧→        | one second back / forward              |
+    /// | ⌥← / ⌥→        | move the whole range by one second     |
+    /// | ↑ / ↓          | jump to range start / end              |
+    /// | Home / End     | jump to the oldest frame / now         |
+    /// | I / O          | set range start / end at the playhead  |
+    /// | A              | select the whole buffer                |
+    /// | Return         | export                                 |
+    /// | Esc            | close                                  |
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let modifiers = &event.keystroke.modifiers;
+        let frame = 1.0 / self.fps;
+        let step = if modifiers.shift { 1.0 } else { frame };
+
         match event.keystroke.key.as_str() {
             "escape" => cx.quit(),
             "space" => self.toggle_play(cx),
             "enter" => self.export(cx),
-            "left" => self.nudge(0.25, cx),
-            "right" => self.nudge(-0.25, cx),
-            _ => {}
+            "left" if modifiers.alt => self.shift_range(1.0, cx),
+            "right" if modifiers.alt => self.shift_range(-1.0, cx),
+            "left" => self.nudge(step, cx),
+            "right" => self.nudge(-step, cx),
+            "up" => self.jump_to_start(cx),
+            "down" => self.jump_to_end(cx),
+            "home" => {
+                self.stop_playback();
+                self.set_playhead(self.span, cx);
+            }
+            "end" => {
+                self.stop_playback();
+                self.set_playhead(0.0, cx);
+            }
+            "i" => self.mark_start(cx),
+            "o" => self.mark_end(cx),
+            "a" => self.reset_range(cx),
+            _ => return,
         }
+        // Reporting the key as handled is what stops AppKit offering it again:
+        // unhandled, one press arrived as a key equivalent and a key down (and
+        // sometimes more), so every arrow stepped two or three frames.
+        cx.stop_propagation();
     }
 
-    fn timeline_down(&mut self, x: f32, left: f32, width: f32, cx: &mut Context<Self>) {
+    /// Marking past the other end pushes it along, as in editing tools, rather
+    /// than silently refusing the mark.
+    fn mark_start(&mut self, cx: &mut Context<Self>) {
+        self.sel_from = self.playhead.clamp(0.1, self.span);
+        self.sel_to = self.sel_to.min(self.sel_from - 0.1).max(0.0);
+        cx.notify();
+    }
+
+    fn mark_end(&mut self, cx: &mut Context<Self>) {
+        self.sel_to = self.playhead.clamp(0.0, self.span - 0.1);
+        self.sel_from = self.sel_from.max(self.sel_to + 0.1).min(self.span);
+        cx.notify();
+    }
+
+    fn shift_range(&mut self, delta: f64, cx: &mut Context<Self>) {
+        let delta = delta.clamp(-self.sel_to, self.span - self.sel_from);
+        self.sel_from += delta;
+        self.sel_to += delta;
+        cx.notify();
+    }
+
+    /// The ruler always seeks; the row edits the range. Mixing the two made
+    /// the playhead impossible to grab, because it starts on the range edge and
+    /// any click near it trimmed or moved the range instead.
+    fn timeline_down(
+        &mut self,
+        x: f32,
+        on_ruler: bool,
+        left: f32,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) {
         self.stop_playback();
+
+        if on_ruler {
+            self.drag = Some(Drag::Playhead);
+            self.playhead = self.time_at(x, left, width);
+            self.request_frame(cx);
+            cx.notify();
+            return;
+        }
 
         let to_handle = (x - self.x_of(self.sel_to, left, width)).abs();
         let from_handle = (x - self.x_of(self.sel_from, left, width)).abs();
@@ -731,7 +812,7 @@ impl Rewind {
                     .justify_center()
                     .text_xs()
                     .text_color(rgba(0xFFFFFFFF))
-                    .child(format!("−{:.1}s", self.playhead)),
+                    .child(format!("−{:.2}s", self.playhead)),
             )
             .child(
                 // Ruler and row together are the seek / drag surface.
@@ -744,7 +825,15 @@ impl Rewind {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
-                            view.timeline_down(event.position.x.into(), track_origin, track_width, cx)
+                            let y: f32 = event.position.y.into();
+                            let on_ruler = y < bar_top + ROW_Y;
+                            view.timeline_down(
+                                event.position.x.into(),
+                                on_ruler,
+                                track_origin,
+                                track_width,
+                                cx,
+                            )
                         }),
                     ),
             )
