@@ -36,7 +36,11 @@ const LABEL_WIDTH: f32 = 38.0;
 
 /// Toolbar row: grouped controls in recessed pills.
 const TOOLBAR_Y: f32 = 6.0;
-const TOOLBAR_H: f32 = 30.0;
+/// One control height for every button, segment and group, so nothing in the
+/// toolbar is a different size from its neighbours.
+const CONTROL_H: f32 = 26.0;
+const GROUP_H: f32 = 30.0;
+const CONTROL_RADIUS: f32 = 8.0;
 
 /// Ruler: bare numbers on the panel, with the playhead badge riding on it.
 const RULER_Y: f32 = 38.0;
@@ -1227,7 +1231,7 @@ impl Rewind {
             .absolute()
             .left(px(BAR_PADDING))
             .top(px(TOOLBAR_Y))
-            .h(px(TOOLBAR_H))
+            .h(px(GROUP_H))
             .flex()
             .items_center()
             .gap(px(10.0))
@@ -1283,7 +1287,7 @@ impl Rewind {
             .absolute()
             .right(px(BAR_PADDING))
             .top(px(TOOLBAR_Y))
-            .h(px(TOOLBAR_H))
+            .h(px(GROUP_H))
             .flex()
             .items_center()
             .gap(px(4.0))
@@ -1550,9 +1554,9 @@ fn panel() -> Div {
 /// A recessed pill that groups related controls, as in the reference.
 fn group() -> Div {
     div()
-        .h(px(TOOLBAR_H))
+        .h(px(GROUP_H))
         .px(px(2.0))
-        .rounded(px(8.0))
+        .rounded(px(CONTROL_RADIUS + 1.0))
         .bg(rgba(GROUP))
         .flex()
         .items_center()
@@ -1561,9 +1565,9 @@ fn group() -> Div {
 
 fn icon_button(glyph: &'static str) -> Div {
     div()
-        .w(px(28.0))
-        .h(px(26.0))
-        .rounded(px(7.0))
+        .w(px(CONTROL_H))
+        .h(px(CONTROL_H))
+        .rounded(px(CONTROL_RADIUS))
         .flex()
         .items_center()
         .justify_center()
@@ -1577,9 +1581,9 @@ fn icon_button(glyph: &'static str) -> Div {
 /// One half of a two-way switch.
 fn segment(label: &'static str, active: bool) -> Div {
     div()
-        .h(px(24.0))
-        .px(px(9.0))
-        .rounded(px(7.0))
+        .h(px(CONTROL_H))
+        .px(px(10.0))
+        .rounded(px(CONTROL_RADIUS))
         .flex()
         .items_center()
         .text_xs()
@@ -1592,9 +1596,9 @@ fn segment(label: &'static str, active: bool) -> Div {
 
 fn label_button(label: &'static str) -> Div {
     div()
-        .h(px(26.0))
-        .px(px(10.0))
-        .rounded(px(7.0))
+        .h(px(CONTROL_H))
+        .px(px(12.0))
+        .rounded(px(CONTROL_RADIUS))
         .flex()
         .items_center()
         .text_xs()
