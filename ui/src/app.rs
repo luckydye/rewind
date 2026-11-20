@@ -75,7 +75,7 @@ const EDGE_FRAME_WIDTH: i64 = 640;
 
 // MARK: - Palette
 
-const SCRIM: u32 = 0x08080CDB;
+const SCRIM: u32 = 0x08080CB8;
 const PANEL: u32 = 0x1B1B1EF5;
 const SUNKEN: u32 = 0x0D0D0FFF;
 const BORDER: u32 = 0xFFFFFF12;
