@@ -44,6 +44,12 @@ const ROW_H: f32 = 38.0;
 const BLOCK_INSET: f32 = 5.0;
 
 const HANDLE_REACH: f32 = 10.0;
+
+/// Trackpad travel per second of footage. 120 pt is about 4 pt per frame at
+/// 30 fps: a deliberate swipe moves a few seconds, a small one steps frames.
+/// Independent of the timeline's width, so a long buffer does not make it
+/// twitchier.
+const SCRUB_POINTS_PER_SECOND: f64 = 120.0;
 const BADGE_WIDTH: f32 = 66.0;
 
 /// Capture is native-resolution (33 MB per frame on a 4K display). A 2K preview
@@ -391,6 +397,35 @@ impl Rewind {
         cx.notify();
     }
 
+    /// Two-finger horizontal scrubbing. The playhead follows the fingers:
+    /// swiping right moves it right, i.e. towards now. Mostly vertical swipes
+    /// are ignored so resting fingers or a diagonal flick do not seek.
+    fn on_scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let seconds = match event.delta {
+            ScrollDelta::Pixels(delta) => {
+                let x = f32::from(delta.x) as f64;
+                let y = f32::from(delta.y) as f64;
+                if x.abs() <= y.abs() {
+                    return;
+                }
+                x / SCRUB_POINTS_PER_SECOND
+            }
+            // A notched mouse wheel: one notch is one frame, either axis.
+            ScrollDelta::Lines(delta) => {
+                let lines = if delta.x != 0.0 { delta.x } else { delta.y };
+                lines as f64 / self.fps
+            }
+        };
+        if seconds == 0.0 {
+            return;
+        }
+
+        self.stop_playback();
+        let next = self.playhead - seconds;
+        self.set_playhead(next, cx);
+        cx.stop_propagation();
+    }
+
     // MARK: - Close
 
     /// Closing copies the frame under the playhead to the clipboard at native
@@ -684,6 +719,7 @@ impl Render for Rewind {
             .bg(rgba(SCRIM))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_mouse_move(cx.listener(move |view, event: &MouseMoveEvent, _window, cx| {
                 if view.drag.is_some() && event.pressed_button == Some(MouseButton::Left) {
                     view.timeline_drag(event.position.x.into(), track_origin, track_width, cx)

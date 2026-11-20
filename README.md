@@ -154,6 +154,7 @@ inside the overlay as status pills and a side panel, which was decoration.
 | input | |
 |---|---|
 | drag on the ruler | seek |
+| two-finger swipe left / right | scrub (120 pt per second, ~4 pt per frame) |
 | drag the range block | move the range |
 | drag a range edge | trim |
 | Space | play / pause |
@@ -165,7 +166,7 @@ inside the overlay as status pills and a side panel, which was decoration.
 | I / O | set range start / end at the playhead |
 | A | select the whole buffer |
 | Return | export |
-| Escape | close |
+| Escape | copy the frame under the playhead to the clipboard, then close |
 
 Export writes to `~/Movies/Rewind/`; the bar then offers a Reveal button rather
 than opening Finder unprompted, because stealing focus would break Escape.
