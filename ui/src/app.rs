@@ -921,6 +921,11 @@ impl Render for Rewind {
                 )
                 .into_any_element(),
 
+            // Before the first frame there is nothing to animate: draw no panel
+            // at all, so the overlay opens onto the dimmed desktop and the video
+            // grows out of it instead of a grey slab appearing first.
+            None if self.progress < 1.0 => div().into_any_element(),
+
             None => div()
                 .absolute()
                 .left(px(image_left))
