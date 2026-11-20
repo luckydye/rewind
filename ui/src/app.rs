@@ -25,6 +25,10 @@ const GAP: f32 = 8.0;
 const BAR_HEIGHT: f32 = 102.0;
 const BAR_PADDING: f32 = 6.0;
 
+/// Past this the timeline is too long to scrub precisely or take in at a
+/// glance, so on wide screens the bar is centred instead of spanning the edge.
+const MAX_BAR_WIDTH: f32 = 1100.0;
+
 /// Room for half a tick label beyond each end of the track, so "-0s" is not
 /// clipped by the bar's right edge.
 const RULER_INSET: f32 = 26.0;
@@ -692,12 +696,13 @@ impl Render for Rewind {
         let height: f32 = viewport.height.into();
 
         let bar_top = height - MARGIN - BAR_HEIGHT;
-        let bar_width = width - MARGIN * 2.0;
+        let bar_width = (width - MARGIN * 2.0).min(MAX_BAR_WIDTH);
+        let bar_left = (width - bar_width) / 2.0;
         // track_left is relative to the bar (used for layout); track_origin is
         // absolute in the window (used for pointer maths). Mixing the two put
         // the playhead a bar-margin away from the cursor.
         let track_left = BAR_PADDING + RULER_INSET;
-        let track_origin = MARGIN + track_left;
+        let track_origin = bar_left + track_left;
         let track_width = (bar_width - (BAR_PADDING + RULER_INSET) * 2.0).max(1.0);
 
         let stage_left = MARGIN;
@@ -785,6 +790,7 @@ impl Render for Rewind {
             .child(stage)
             .child(self.transport_bar(
                 bar_top,
+                bar_left,
                 bar_width,
                 track_left,
                 track_origin,
@@ -804,6 +810,7 @@ impl Rewind {
     fn transport_bar(
         &self,
         bar_top: f32,
+        bar_left: f32,
         bar_width: f32,
         track_left: f32,
         track_origin: f32,
@@ -900,7 +907,7 @@ impl Rewind {
 
         panel()
             .absolute()
-            .left(px(MARGIN))
+            .left(px(bar_left))
             .top(px(bar_top))
             .w(px(bar_width))
             .h(px(BAR_HEIGHT))
