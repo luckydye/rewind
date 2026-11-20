@@ -51,6 +51,15 @@ enum Router {
                 )
                 return .image(image)
 
+            case .copyFrame:
+                // Native resolution regardless of what the overlay previews at.
+                let image = try await recorder.preview(
+                    secondsAgo: request.seconds ?? 0,
+                    width: 0
+                )
+                try await Clipboard.copy(image)
+                return .json(Response(ok: true))
+
             case .quit:
                 // Let the response reach the client before the socket goes away.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {

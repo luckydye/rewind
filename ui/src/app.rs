@@ -106,6 +106,11 @@ pub struct Rewind {
     playback_clock: Option<Instant>,
     activated: bool,
     last_clip: Option<String>,
+    /// A close is in flight: the frame is being copied before the overlay exits.
+    closing: bool,
+    /// The last copy failed; the next close exits without trying again, so a
+    /// dead daemon cannot trap the user in the overlay.
+    copy_failed: bool,
 }
 
 impl Rewind {
@@ -147,6 +152,8 @@ impl Rewind {
             playback_clock: None,
             activated: false,
             last_clip: None,
+            closing: false,
+            copy_failed: false,
         };
 
         view.request_frame(cx);
@@ -384,6 +391,52 @@ impl Rewind {
         cx.notify();
     }
 
+    // MARK: - Close
+
+    /// Closing copies the frame under the playhead to the clipboard at native
+    /// resolution, then exits once the daemon confirms.
+    fn close(&mut self, cx: &mut Context<Self>) {
+        if self.copy_failed {
+            cx.quit();
+            return;
+        }
+        if self.closing {
+            return;
+        }
+
+        self.closing = true;
+        self.stop_playback();
+        self.status = Some(Status::Info("copying frame…".into()));
+        let seconds = self.playhead;
+        let client = self.client.clone();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut request = Request::new(Command::CopyFrame);
+                    request.seconds = Some(seconds);
+                    ipc::call(&client, request)
+                })
+                .await;
+
+            this.update(cx, |view, cx| match result {
+                Ok(_) => cx.quit(),
+                Err(error) => {
+                    view.closing = false;
+                    view.copy_failed = true;
+                    view.status = Some(Status::Error(format!(
+                        "copy failed: {error} — close again to exit"
+                    )));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
     // MARK: - Input
 
     /// Editing-tool conventions. Times are seconds *ago*, so moving left on
@@ -407,7 +460,7 @@ impl Rewind {
         let step = if modifiers.shift { 1.0 } else { frame };
 
         match event.keystroke.key.as_str() {
-            "escape" => cx.quit(),
+            "escape" => self.close(cx),
             "space" => self.toggle_play(cx),
             "enter" => self.export(cx),
             "left" if modifiers.alt => self.shift_range(1.0, cx),
@@ -749,7 +802,7 @@ impl Rewind {
             )
             .child(icon_button("✕").on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|_view, _: &MouseDownEvent, _window, cx| cx.quit()),
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.close(cx)),
             ));
 
         let block_top = ROW_Y + BLOCK_INSET;
