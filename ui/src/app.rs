@@ -92,6 +92,10 @@ pub struct Rewind {
     focus: FocusHandle,
     client: Client,
     span: f64,
+    /// The moment "now" refers to, pinned when the overlay opens. Capture keeps
+    /// running behind the overlay; measuring from the live end of the buffer
+    /// made playback run at double speed and the paused preview drift.
+    anchor: Option<f64>,
     /// Capture frame rate, so frame stepping lands on real frames.
     fps: f64,
     playhead: f64,
@@ -132,6 +136,7 @@ impl Rewind {
             .map(|state| state.available_seconds.max(0.5))
             .unwrap_or(1.0);
         let sel_from = span.min(10.0);
+        let anchor = state.and_then(|state| state.newest_timestamp);
         let fps = state.map(|state| state.config.fps as f64).unwrap_or(30.0).max(1.0);
         let status = response
             .as_ref()
@@ -142,6 +147,7 @@ impl Rewind {
             focus: cx.focus_handle(),
             client,
             span,
+            anchor,
             fps,
             playhead: sel_from,
             sel_from,
@@ -232,6 +238,10 @@ impl Rewind {
             return;
         }
 
+        // At the very end there is nothing left to play: start the range over.
+        if self.playhead <= 0.001 {
+            self.playhead = self.sel_from;
+        }
         self.playing = true;
         self.playback_clock = Some(Instant::now());
         self.ticker = Some(cx.spawn(async move |this, cx| {
@@ -253,12 +263,24 @@ impl Rewind {
                             .unwrap_or(0.0);
                         view.playback_clock = Some(now);
 
+                        let before = view.playhead;
                         view.playhead -= elapsed;
-                        if view.playhead < view.sel_to {
+
+                        // Loop only when the playhead crosses the range end.
+                        // Starting after the range plays on towards now
+                        // instead of snapping back; starting before it plays
+                        // into the range and then loops.
+                        if before >= view.sel_to && view.playhead < view.sel_to {
                             // Carry the overshoot so looping does not drift.
                             let overshoot = view.sel_to - view.playhead;
                             let duration = view.selection_duration().max(0.01);
                             view.playhead = view.sel_from - (overshoot % duration);
+                        } else if view.playhead <= 0.0 {
+                            view.playhead = 0.0;
+                            view.stop_playback();
+                            view.request_frame(cx);
+                            cx.notify();
+                            return false;
                         }
 
                         view.request_frame(cx);
@@ -286,6 +308,7 @@ impl Rewind {
         self.in_flight = true;
         self.requested = Some(self.playhead);
         let seconds = self.playhead;
+        let anchor = self.anchor;
         let client = self.client.clone();
 
         cx.spawn(async move |this, cx| {
@@ -294,6 +317,7 @@ impl Rewind {
                 .spawn(async move {
                     let mut request = Request::new(Command::PreviewFrame);
                     request.seconds = Some(seconds);
+                    request.anchor = anchor;
                     request.width = Some(PREVIEW_WIDTH);
                     client.send(&request)
                 })
@@ -370,6 +394,7 @@ impl Rewind {
             from: self.sel_from,
             to: self.sel_to,
         };
+        let anchor = self.anchor;
         let client = self.client.clone();
 
         cx.spawn(async move |this, cx| {
@@ -382,6 +407,7 @@ impl Rewind {
                         Command::ExportClip
                     });
                     request.range = Some(range);
+                    request.anchor = anchor;
                     ipc::call(&client, request)
                 })
                 .await;
@@ -462,6 +488,7 @@ impl Rewind {
         self.stop_playback();
         self.status = Some(Status::Info("copying frame…".into()));
         let seconds = self.playhead;
+        let anchor = self.anchor;
         let client = self.client.clone();
 
         cx.spawn(async move |this, cx| {
@@ -470,6 +497,7 @@ impl Rewind {
                 .spawn(async move {
                     let mut request = Request::new(Command::CopyFrame);
                     request.seconds = Some(seconds);
+                    request.anchor = anchor;
                     ipc::call(&client, request)
                 })
                 .await;

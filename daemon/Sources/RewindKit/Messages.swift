@@ -38,6 +38,10 @@ public struct Request: Codable, Sendable {
     public var width: Int?
     public var count: Int?
     public var range: ClipRange?
+    /// Absolute timestamp (seconds) that "now" refers to. The overlay pins it
+    /// when it opens; without it, times are measured from the newest frame,
+    /// which keeps moving because capture continues while the overlay is open.
+    public var anchor: Double?
 
     public init(
         command: Command,
@@ -46,7 +50,8 @@ public struct Request: Codable, Sendable {
         path: String? = nil,
         width: Int? = nil,
         count: Int? = nil,
-        range: ClipRange? = nil
+        range: ClipRange? = nil,
+        anchor: Double? = nil
     ) {
         self.command = command
         self.config = config
@@ -55,6 +60,7 @@ public struct Request: Codable, Sendable {
         self.width = width
         self.count = count
         self.range = range
+        self.anchor = anchor
     }
 }
 
@@ -74,6 +80,8 @@ public struct State: Codable, Sendable {
     public var idleNotices: Int
     public var onBattery: Bool
     public var lastError: String?
+    /// Timestamp of the newest buffered frame; the overlay's anchor.
+    public var newestTimestamp: Double?
 
     public init(
         recording: Bool,
@@ -90,7 +98,8 @@ public struct State: Codable, Sendable {
         droppedFrames: Int,
         idleNotices: Int,
         onBattery: Bool,
-        lastError: String?
+        lastError: String?,
+        newestTimestamp: Double?
     ) {
         self.recording = recording
         self.config = config
@@ -107,6 +116,7 @@ public struct State: Codable, Sendable {
         self.idleNotices = idleNotices
         self.onBattery = onBattery
         self.lastError = lastError
+        self.newestTimestamp = newestTimestamp
     }
 }
 

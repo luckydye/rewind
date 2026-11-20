@@ -52,12 +52,16 @@ final class FrameRing {
 
     /// Returns the frames between `from` and `to` seconds before now, cut at the
     /// last keyframe before `from` so the clip decodes without re-encoding.
-    func snapshot(from secondsAgo: TimeInterval, to endSecondsAgo: TimeInterval) throws -> RingSnapshot {
+    func snapshot(
+        from secondsAgo: TimeInterval,
+        to endSecondsAgo: TimeInterval,
+        anchor: Double? = nil
+    ) throws -> RingSnapshot {
         lock.lock()
         defer { lock.unlock() }
 
         guard let last = frames.last else { throw FrameRingError.empty }
-        let now = last.presentationTimeStamp.seconds
+        let now = anchor ?? last.presentationTimeStamp.seconds
         let windowStart = now - secondsAgo
         let windowEnd = now - endSecondsAgo
 
@@ -100,6 +104,12 @@ final class FrameRing {
 
     func snapshot(last seconds: TimeInterval) throws -> RingSnapshot {
         try snapshot(from: seconds, to: 0)
+    }
+
+    func newestTimestamp() -> Double? {
+        lock.lock()
+        defer { lock.unlock() }
+        return frames.last?.presentationTimeStamp.seconds
     }
 
     func statistics() -> (bytes: Int, duration: TimeInterval, frames: Int) {

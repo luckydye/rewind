@@ -30,7 +30,8 @@ enum Router {
                 let clip = try await recorder.export(
                     from: range.from,
                     to: range.to,
-                    path: request.path
+                    path: request.path,
+                    anchor: request.anchor
                 )
                 return .json(Response(ok: true, state: await recorder.state(), clip: clip))
 
@@ -41,7 +42,8 @@ enum Router {
                 let clip = try await recorder.export(
                     from: range.from,
                     to: range.to,
-                    path: Clipboard.newCachedClipURL().path
+                    path: Clipboard.newCachedClipURL().path,
+                    anchor: request.anchor
                 )
                 try await Clipboard.copyFile(URL(fileURLWithPath: clip.path))
                 return .json(Response(ok: true, state: await recorder.state(), clip: clip))
@@ -59,7 +61,8 @@ enum Router {
             case .previewFrame:
                 let image = try await recorder.preview(
                     secondsAgo: request.seconds ?? 0,
-                    width: request.width ?? 0
+                    width: request.width ?? 0,
+                    anchor: request.anchor
                 )
                 return .image(image)
 
@@ -67,7 +70,8 @@ enum Router {
                 // Native resolution regardless of what the overlay previews at.
                 let image = try await recorder.preview(
                     secondsAgo: request.seconds ?? 0,
-                    width: 0
+                    width: 0,
+                    anchor: request.anchor
                 )
                 try await Clipboard.copy(image)
                 return .json(Response(ok: true))

@@ -84,13 +84,14 @@ actor Recorder {
             droppedFrames: counters.dropped,
             idleNotices: counters.idle,
             onBattery: PowerSource.isOnBattery,
-            lastError: lastError
+            lastError: lastError,
+            newestTimestamp: ring?.newestTimestamp()
         )
     }
 
-    func export(from: Double, to: Double, path: String?) async throws -> Clip {
+    func export(from: Double, to: Double, path: String?, anchor: Double? = nil) async throws -> Clip {
         guard let ring, let encoder else { throw RecorderError.notRecording }
-        let snapshot = try ring.snapshot(from: from, to: to)
+        let snapshot = try ring.snapshot(from: from, to: to, anchor: anchor)
         let url = path.map { URL(fileURLWithPath: $0) } ?? Self.newClipURL()
 
         let result = try await Task.detached {
@@ -107,18 +108,19 @@ actor Recorder {
         )
     }
 
-    func preview(secondsAgo: Double, width: Int) async throws -> RawImage {
+    func preview(secondsAgo: Double, width: Int, anchor: Double? = nil) async throws -> RawImage {
         guard let ring else { throw RecorderError.notRecording }
-        let snapshot = try ring.snapshot(last: config.bufferSeconds)
-        let index = Self.frameIndex(secondsAgo: secondsAgo, frames: snapshot.frames)
+        let snapshot = try ring.snapshot(from: .infinity, to: 0, anchor: anchor)
+        guard let last = snapshot.frames.last else { throw FrameRingError.empty }
+        let now = anchor ?? last.presentationTimeStamp.seconds
+        let index = Self.frameIndex(at: now - secondsAgo, frames: snapshot.frames)
         return try previews.frame(frames: snapshot.frames, index: index, width: width)
     }
 
-    static func frameIndex(secondsAgo: Double, frames: [CMSampleBuffer]) -> Int {
-        guard let last = frames.last else { return 0 }
-        let target = last.presentationTimeStamp.seconds - secondsAgo
+    /// The newest frame at or before `time`: the frame that was on screen then.
+    static func frameIndex(at time: Double, frames: [CMSampleBuffer]) -> Int {
         for index in stride(from: frames.count - 1, through: 0, by: -1)
-        where frames[index].presentationTimeStamp.seconds <= target {
+        where frames[index].presentationTimeStamp.seconds <= time {
             return index
         }
         return 0

@@ -93,6 +93,8 @@ pub struct Request {
     pub width: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range: Option<ClipRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<f64>,
 }
 
 impl Request {
@@ -104,6 +106,7 @@ impl Request {
             path: None,
             width: None,
             range: None,
+            anchor: None,
         }
     }
 }
@@ -129,6 +132,8 @@ pub struct State {
     pub idle_notices: i64,
     pub on_battery: bool,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub newest_timestamp: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
