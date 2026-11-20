@@ -58,6 +58,14 @@ enum Router {
             case .listApplications:
                 return .json(Response(ok: true, applications: try await recorder.applications()))
 
+            case .thumbnails:
+                let images = try await recorder.thumbnails(
+                    count: request.count ?? 24,
+                    width: request.width ?? 160,
+                    anchor: request.anchor
+                )
+                return .images(images)
+
             case .previewFrame:
                 let image = try await recorder.preview(
                     secondsAgo: request.seconds ?? 0,

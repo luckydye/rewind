@@ -35,9 +35,13 @@ public enum ReplyError: Error, CustomStringConvertible {
 public enum Reply {
     case json(Response)
     case image(RawImage)
+    /// A batch of images, so a timeline strip is one round trip instead of one
+    /// per thumbnail.
+    case images([RawImage])
 
     public static let jsonKind: UInt8 = 0
     public static let imageKind: UInt8 = 1
+    public static let imagesKind: UInt8 = 2
 
     /// Writes straight to the socket. An image frame is several megabytes, so
     /// assembling it in an intermediate `Data` first would copy it twice more
@@ -48,6 +52,23 @@ public enum Reply {
             var payload = Data([Self.jsonKind])
             payload.append(try JSONEncoder().encode(response))
             SocketIO.writeAll(fd, Frame.encode(payload))
+
+        case .images(let images):
+            let body = images.reduce(0) { $0 + 8 + $1.pixels.count }
+            var prefix = Data(capacity: 9)
+            // kind + count + entries
+            prefix.append(bigEndian: UInt32(1 + 4 + body))
+            prefix.append(Self.imagesKind)
+            prefix.append(bigEndian: UInt32(images.count))
+
+            SocketIO.writeAll(fd, prefix)
+            for image in images {
+                var header = Data(capacity: 8)
+                header.append(bigEndian: UInt32(image.width))
+                header.append(bigEndian: UInt32(image.height))
+                SocketIO.writeAll(fd, header)
+                SocketIO.writeAll(fd, image.pixels)
+            }
 
         case .image(let image):
             var prefix = Data(capacity: 13)
@@ -76,6 +97,29 @@ public enum Reply {
             let pixels = Data(body.dropFirst(8))
             guard pixels.count == width * height * 4 else { throw ReplyError.truncated }
             return .image(RawImage(width: width, height: height, pixels: pixels))
+
+        case imagesKind:
+            guard body.count >= 4 else { throw ReplyError.truncated }
+            let count = Int(body.readBigEndianUInt32(at: 0))
+            var images: [RawImage] = []
+            var offset = 4
+            for _ in 0..<count {
+                guard body.count >= offset + 8 else { throw ReplyError.truncated }
+                let width = Int(body.readBigEndianUInt32(at: offset))
+                let height = Int(body.readBigEndianUInt32(at: offset + 4))
+                offset += 8
+                let size = width * height * 4
+                guard body.count >= offset + size else { throw ReplyError.truncated }
+                images.append(
+                    RawImage(
+                        width: width,
+                        height: height,
+                        pixels: Data(body.dropFirst(offset).prefix(size))
+                    )
+                )
+                offset += size
+            }
+            return .images(images)
 
         default:
             throw ReplyError.unknownKind(kind)

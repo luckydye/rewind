@@ -56,10 +56,19 @@ const HANDLE_REACH: f32 = 10.0;
 const SCRUB_POINTS_PER_SECOND: f64 = 120.0;
 const BADGE_WIDTH: f32 = 66.0;
 
+/// Entrance: the preview starts full-bleed and shrinks into place, then the bar
+/// slides up from below the screen edge. ~300 ms in total.
+const MORPH_MS: u64 = 260;
+const MORPH_STEPS: u64 = 18;
+
 /// Capture is native-resolution (33 MB per frame on a 4K display). A 2K preview
 /// costs ~11 MB and about 40 ms round trip, which keeps scrubbing usable; the
 /// exported clip is full resolution either way.
 const PREVIEW_WIDTH: i64 = 2048;
+
+/// The timeline strip: one thumbnail per slot, decoded from keyframes.
+const THUMBNAIL_COUNT: i64 = 24;
+const THUMBNAIL_WIDTH: i64 = 160;
 
 
 
@@ -104,9 +113,18 @@ pub struct Rewind {
     anchor: Option<f64>,
     /// Capture frame rate, so frame stepping lands on real frames.
     fps: f64,
+    /// Entrance progress: 0 is a full-bleed preview with the bar off-screen,
+    /// 1 is the resting layout.
+    progress: f32,
     /// Top inset the system keeps clear (menu bar, camera housing), so the
     /// preview is never covered by the notch.
     safe_top: f32,
+    /// Timeline strip, one per slot, oldest first.
+    thumbnails: Vec<Arc<RenderImage>>,
+    /// Aspect of a thumbnail, used to cover-crop it into its slot.
+    thumbnail_aspect: f32,
+    /// Screen rect (AppKit coordinates) of the display being captured.
+    screen: Option<(f64, f64, f64, f64)>,
     playhead: f64,
     sel_from: f64,
     sel_to: f64,
@@ -139,7 +157,11 @@ impl Rewind {
             span: 1.0,
             anchor: None,
             fps: 30.0,
+            progress: 1.0,
             safe_top: 0.0,
+            thumbnails: Vec::new(),
+            thumbnail_aspect: 16.0 / 9.0,
+            screen: None,
             playhead: 0.0,
             sel_from: 0.0,
             sel_to: 0.0,
@@ -180,6 +202,14 @@ impl Rewind {
             .and_then(|state| state.display.as_ref())
             .map(|display| display.safe_area_top as f32)
             .unwrap_or(0.0);
+        self.screen = state.and_then(|state| state.display.as_ref()).and_then(|display| {
+            (display.screen_width > 0.0).then_some((
+                display.screen_x,
+                display.screen_y,
+                display.screen_width,
+                display.screen_height,
+            ))
+        });
         self.sel_from = self.span.min(10.0);
         self.sel_to = 0.0;
         self.playhead = self.sel_from;
@@ -188,15 +218,21 @@ impl Rewind {
             .err()
             .map(|error| Status::Error(error.to_string()));
         self.frame = None;
+        self.thumbnails = Vec::new();
         self.drag = None;
         self.closing = false;
         self.copy_failed = false;
         self.request_frame(cx);
+        self.fetch_thumbnails(cx);
         cx.notify();
     }
 
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.refresh(cx);
+        // Open on the display actually being captured, not always the primary.
+        if let Some((x, y, width, height)) = self.screen {
+            crate::activate::place(x, y, width, height);
+        }
         window.focus(&self.focus);
         // Fade at the window-server level so it costs no frames here: the
         // overlay is transparent, ordered front, then animated to opaque.
@@ -210,6 +246,65 @@ impl Rewind {
                 .timer(Duration::from_millis(120))
                 .await;
             crate::activate::activate();
+        })
+        .detach();
+
+        self.progress = 0.0;
+        self.animate_in(cx);
+    }
+
+    /// The strip is fetched once per show, in one request, from keyframes.
+    fn fetch_thumbnails(&mut self, cx: &mut Context<Self>) {
+        let anchor = self.anchor;
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let reply = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut request = Request::new(Command::Thumbnails);
+                    request.count = Some(THUMBNAIL_COUNT);
+                    request.width = Some(THUMBNAIL_WIDTH);
+                    request.anchor = anchor;
+                    client.send(&request)
+                })
+                .await;
+
+            this.update(cx, |view, cx| {
+                if let Ok(Reply::Images(images)) = reply {
+                    if let Some(first) = images.first() {
+                        view.thumbnail_aspect = first.width as f32 / first.height.max(1) as f32;
+                    }
+                    view.thumbnails = images
+                        .into_iter()
+                        .filter_map(|image| build_image(image).ok())
+                        .collect();
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Bounded step task that drives the entrance geometry: eighteen frames,
+    /// then it stops. GPUI's `with_animation` never advanced here.
+    fn animate_in(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            for step in 1..=MORPH_STEPS {
+                cx.background_executor()
+                    .timer(Duration::from_millis(MORPH_MS / MORPH_STEPS))
+                    .await;
+                let finished = this
+                    .update(cx, |view, cx| {
+                        view.progress = step as f32 / MORPH_STEPS as f32;
+                        cx.notify();
+                        step == MORPH_STEPS
+                    })
+                    .unwrap_or(true);
+                if finished {
+                    break;
+                }
+            }
         })
         .detach();
     }
@@ -397,6 +492,9 @@ impl Rewind {
                     }
                     Err(message) => self.status = Some(Status::Error(message)),
                 }
+            }
+            Ok(Reply::Images(_)) => {
+                self.status = Some(Status::Error("expected a frame".into()));
             }
             Ok(Reply::Json(response)) => {
                 self.status = Some(Status::Error(
@@ -660,6 +758,8 @@ impl Rewind {
         cx: &mut Context<Self>,
     ) {
         self.stop_playback();
+        // Grabbing the timeline mid-animation should not fight it.
+        self.progress = 1.0;
 
         if on_ruler {
             self.drag = Some(Drag::Playhead);
@@ -750,14 +850,34 @@ impl Render for Rewind {
         let stage_height = (bar_top - GAP - stage_top).max(1.0);
 
         let (frame_width, frame_height) = self.frame_size;
-        let (image_width, image_height) = fit(
+        let (fit_width, fit_height) = fit(
             frame_width as f32,
             frame_height as f32,
             stage_width,
             stage_height,
         );
-        let image_left = stage_left + (stage_width - image_width) / 2.0;
-        let image_top = stage_top + (stage_height - image_height) / 2.0;
+
+        // Anchor the morph: the image starts covering the screen and shrinks to
+        // the fitted rect. Both rects keep the frame's aspect, so it is never
+        // stretched, only cropped by the window while it is larger than it.
+        let eased = 1.0 - (1.0 - self.progress).powi(3);
+        let (cover_width, cover_height) =
+            cover(frame_width as f32, frame_height as f32, width, height);
+
+        let start_left = (width - cover_width) / 2.0;
+        let start_top = (height - cover_height) / 2.0;
+        let end_left = stage_left + (stage_width - fit_width) / 2.0;
+        let end_top = stage_top + (stage_height - fit_height) / 2.0;
+
+        let image_width = cover_width + (fit_width - cover_width) * eased;
+        let image_height = cover_height + (fit_height - cover_height) * eased;
+        let image_left = start_left + (end_left - start_left) * eased;
+        let image_top = start_top + (end_top - start_top) * eased;
+        let image_radius = 14.0 * eased;
+
+        // The bar follows, arriving from below the screen edge.
+        let bar_progress = ((eased - 0.35) / 0.65).clamp(0.0, 1.0);
+        let bar_draw_top = bar_top + (1.0 - bar_progress) * (BAR_HEIGHT + MARGIN * 2.0);
 
         let span = self.span;
         let x_for =
@@ -774,7 +894,7 @@ impl Render for Rewind {
                 .top(px(image_top))
                 .w(px(image_width))
                 .h(px(image_height))
-                .rounded(px(10.0))
+                .rounded(px(image_radius))
                 .overflow_hidden()
                 .border_1()
                 .border_color(rgba(BORDER))
@@ -791,7 +911,7 @@ impl Render for Rewind {
                 .top(px(image_top))
                 .w(px(image_width))
                 .h(px(image_height))
-                .rounded(px(10.0))
+                .rounded(px(image_radius))
                 .bg(rgba(PANEL))
                 .border_1()
                 .border_color(rgba(BORDER))
@@ -829,6 +949,7 @@ impl Render for Rewind {
             .child(stage)
             .child(self.transport_bar(
                 bar_top,
+                bar_draw_top,
                 bar_left,
                 bar_width,
                 track_left,
@@ -849,6 +970,7 @@ impl Rewind {
     fn transport_bar(
         &self,
         bar_top: f32,
+        bar_draw_top: f32,
         bar_left: f32,
         bar_width: f32,
         track_left: f32,
@@ -947,7 +1069,7 @@ impl Rewind {
         panel()
             .absolute()
             .left(px(bar_left))
-            .top(px(bar_top))
+            .top(px(bar_draw_top))
             .w(px(bar_width))
             .h(px(BAR_HEIGHT))
             .child(left)
@@ -963,6 +1085,7 @@ impl Rewind {
                     .rounded(px(8.0))
                     .bg(rgba(SUNKEN)),
             )
+            .child(self.thumbnail_strip(track_left, track_width))
             .child(
                 // The range block. Grabbing its body moves the whole range.
                 div()
@@ -1027,6 +1150,45 @@ impl Rewind {
                     ),
             )
             .into_any_element()
+    }
+
+    /// Filmstrip behind the range block. Each slot is the same width, so the
+    /// strip lines up with the ruler above it.
+    fn thumbnail_strip(&self, track_left: f32, strip_width: f32) -> AnyElement {
+        let mut strip = div()
+            .absolute()
+            .left(px(track_left))
+            .top(px(ROW_Y))
+            .w(px(strip_width))
+            .h(px(ROW_H))
+            .rounded(px(10.0))
+            .overflow_hidden();
+
+        if !self.thumbnails.is_empty() {
+            let slot = strip_width / self.thumbnails.len() as f32;
+            // Cover the slot rather than stretch it: the slot is wider than the
+            // frame, so the frame is scaled to the slot width and the overflow
+            // is clipped by the strip.
+            let covered = slot / self.thumbnail_aspect.max(0.1);
+            let overshoot = (covered - ROW_H) / 2.0;
+            for (index, thumbnail) in self.thumbnails.iter().enumerate() {
+                strip = strip.child(
+                    div()
+                        .absolute()
+                        .left(px(index as f32 * slot))
+                        .top(px(-overshoot))
+                        .w(px(slot + 1.0))
+                        .h(px(covered))
+                        .child(
+                            img(ImageSource::Render(thumbnail.clone()))
+                                .w(px(slot + 1.0))
+                                .h(px(covered)),
+                        ),
+                );
+            }
+        }
+
+        strip.opacity(0.85).into_any_element()
     }
 
     /// Numbers are centred on their tick in a fixed-width box, which keeps the
@@ -1138,6 +1300,15 @@ fn ruler_step(span: f64) -> f64 {
     120.0
 }
 
+/// Largest rect with the frame's aspect that covers the whole screen.
+fn cover(frame_width: f32, frame_height: f32, width: f32, height: f32) -> (f32, f32) {
+    if frame_width <= 0.0 || frame_height <= 0.0 {
+        return (width, height);
+    }
+    let scale = (width / frame_width).max(height / frame_height);
+    (frame_width * scale, frame_height * scale)
+}
+
 fn fit(frame_width: f32, frame_height: f32, max_width: f32, max_height: f32) -> (f32, f32) {
     if frame_width <= 0.0 || frame_height <= 0.0 {
         return (max_width, max_height);
@@ -1196,7 +1367,6 @@ pub fn run(show: bool) {
             .map(|display| display.bounds())
             .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(900.0))));
         let display_id = display.as_ref().map(|display| display.id());
-        let display_size = bounds.size;
 
         let path = ui_socket_path();
         if let Some(parent) = path.parent() {
@@ -1234,10 +1404,7 @@ pub fn run(show: bool) {
             .open_window(options, |_window, cx| cx.new(Rewind::new))
             .expect("could not open the rewind window");
 
-        crate::activate::make_borderless(
-            f32::from(display_size.width),
-            f32::from(display_size.height),
-        );
+        crate::activate::make_borderless();
         crate::activate::make_accessory();
 
         if show {

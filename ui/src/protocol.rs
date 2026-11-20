@@ -41,6 +41,15 @@ pub struct DisplayInfo {
     /// Menu bar / camera housing the system keeps clear at the top.
     #[serde(default)]
     pub safe_area_top: f64,
+    /// AppKit screen frame (origin bottom-left) of this display.
+    #[serde(default)]
+    pub screen_x: f64,
+    #[serde(default)]
+    pub screen_y: f64,
+    #[serde(default)]
+    pub screen_width: f64,
+    #[serde(default)]
+    pub screen_height: f64,
 }
 
 impl DisplayInfo {
@@ -67,6 +76,7 @@ pub enum Command {
     ListDisplays,
     ListApplications,
     PreviewFrame,
+    Thumbnails,
     CopyFrame,
     CopyClip,
     #[serde(rename = "openUI")]
@@ -98,6 +108,8 @@ pub struct Request {
     pub range: Option<ClipRange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<i64>,
 }
 
 impl Request {
@@ -110,6 +122,7 @@ impl Request {
             width: None,
             range: None,
             anchor: None,
+            count: None,
         }
     }
 }

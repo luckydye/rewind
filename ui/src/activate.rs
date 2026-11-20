@@ -82,8 +82,8 @@ pub fn activate() {
     }
 }
 
-/// Turns the overlay window borderless and gives it the exact display size.
-pub fn make_borderless(width: f32, height: f32) {
+/// Turns the overlay window borderless, transparent to capture, and top level.
+pub fn make_borderless() {
     unsafe {
         let window = only_window();
 
@@ -106,12 +106,17 @@ pub fn make_borderless(width: f32, height: f32) {
             set_unsigned(window, selector(c"setSharingType:"), 0);
         }
 
-        let set_pair: SendPair = std::mem::transmute(objc_msgSend as *const ());
-        set_pair(window, selector(c"setContentSize:"), width as f64, height as f64);
+    }
+}
 
-        // AppKit's origin is bottom-left of the screen; the primary display's
-        // bottom-left is (0, 0) and the window is as tall as the display.
-        set_pair(window, selector(c"setFrameOrigin:"), 0.0, 0.0);
+/// Places the overlay over one display. Coordinates are AppKit's: origin at
+/// the bottom-left of the primary screen, which is what NSScreen reports.
+pub fn place(x: f64, y: f64, width: f64, height: f64) {
+    unsafe {
+        let window = only_window();
+        let set_pair: SendPair = std::mem::transmute(objc_msgSend as *const ());
+        set_pair(window, selector(c"setContentSize:"), width, height);
+        set_pair(window, selector(c"setFrameOrigin:"), x, y);
     }
 }
 

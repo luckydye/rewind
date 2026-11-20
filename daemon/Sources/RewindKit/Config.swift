@@ -51,6 +51,13 @@ public struct DisplayInfo: Codable, Equatable, Sendable {
     /// Height of the area the system keeps clear at the top of this display:
     /// the menu bar, and on a laptop with a camera housing, the notch.
     public var safeAreaTop: Double
+    /// Frame of the display in AppKit screen coordinates (origin bottom-left).
+    /// The overlay places its window with these, so it opens on the display
+    /// that is actually being captured.
+    public var screenX: Double
+    public var screenY: Double
+    public var screenWidth: Double
+    public var screenHeight: Double
 
     public init(
         index: Int,
@@ -58,7 +65,11 @@ public struct DisplayInfo: Codable, Equatable, Sendable {
         width: Int,
         height: Int,
         isMain: Bool,
-        safeAreaTop: Double = 0
+        safeAreaTop: Double = 0,
+        screenX: Double = 0,
+        screenY: Double = 0,
+        screenWidth: Double = 0,
+        screenHeight: Double = 0
     ) {
         self.index = index
         self.displayID = displayID
@@ -66,6 +77,10 @@ public struct DisplayInfo: Codable, Equatable, Sendable {
         self.height = height
         self.isMain = isMain
         self.safeAreaTop = safeAreaTop
+        self.screenX = screenX
+        self.screenY = screenY
+        self.screenWidth = screenWidth
+        self.screenHeight = screenHeight
     }
 
     public var name: String {

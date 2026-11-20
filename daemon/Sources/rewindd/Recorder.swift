@@ -89,6 +89,25 @@ actor Recorder {
         )
     }
 
+    func thumbnails(count: Int, width: Int, anchor: Double?) async throws -> [RawImage] {
+        guard let ring else { throw RecorderError.notRecording }
+        let snapshot = try ring.snapshot(from: .infinity, to: 0, anchor: anchor)
+        guard let last = snapshot.frames.last else { throw FrameRingError.empty }
+
+        let now = anchor ?? last.presentationTimeStamp.seconds
+        let span = max(ring.statistics().duration, 0.5)
+        let count = max(1, min(count, 64))
+
+        var indices: [Int] = []
+        indices.reserveCapacity(count)
+        for slot in 0..<count {
+            let secondsAgo = span * (1.0 - (Double(slot) + 0.5) / Double(count))
+            let index = Self.frameIndex(at: now - secondsAgo, frames: snapshot.frames)
+            indices.append(Self.keyframeIndex(atOrBefore: index, frames: snapshot.frames))
+        }
+        return try previews.thumbnails(frames: snapshot.frames, indices: indices, width: width)
+    }
+
     func export(from: Double, to: Double, path: String?, anchor: Double? = nil) async throws -> Clip {
         guard let ring, let encoder else { throw RecorderError.notRecording }
         let snapshot = try ring.snapshot(from: from, to: to, anchor: anchor)
@@ -115,6 +134,16 @@ actor Recorder {
         let now = anchor ?? last.presentationTimeStamp.seconds
         let index = Self.frameIndex(at: now - secondsAgo, frames: snapshot.frames)
         return try previews.frame(frames: snapshot.frames, index: index, width: width)
+    }
+
+    /// Keyframes are at most a second apart, so walking back a few steps is
+    /// enough and much cheaper than scanning the whole buffer.
+    static func keyframeIndex(atOrBefore index: Int, frames: [CMSampleBuffer]) -> Int {
+        for candidate in stride(from: index, through: max(0, index - 64), by: -1)
+        where frames[candidate].isKeyframe {
+            return candidate
+        }
+        return 0
     }
 
     /// The newest frame at or before `time`: the frame that was on screen then.

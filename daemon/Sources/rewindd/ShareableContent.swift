@@ -6,13 +6,11 @@ import ScreenCaptureKit
 enum ShareableContent {
     /// `NSScreen.safeAreaInsets` is the only API that accounts for the camera
     /// housing; `visibleFrame` only knows about the menu bar.
-    static func safeAreaTop(for displayID: CGDirectDisplayID) -> Double {
+    static func screen(for displayID: CGDirectDisplayID) -> NSScreen? {
         let key = NSDeviceDescriptionKey("NSScreenNumber")
-        for screen in NSScreen.screens
-        where (screen.deviceDescription[key] as? NSNumber)?.uint32Value == displayID {
-            return Double(screen.safeAreaInsets.top)
+        return NSScreen.screens.first {
+            ($0.deviceDescription[key] as? NSNumber)?.uint32Value == displayID
         }
-        return 0
     }
 
     static func displays() async throws -> [DisplayInfo] {
@@ -21,13 +19,18 @@ enum ShareableContent {
             onScreenWindowsOnly: true
         )
         return content.displays.enumerated().map { index, display in
-            DisplayInfo(
+            let screen = Self.screen(for: display.displayID)
+            return DisplayInfo(
                 index: index,
                 displayID: display.displayID,
                 width: CGDisplayPixelsWide(display.displayID),
                 height: CGDisplayPixelsHigh(display.displayID),
                 isMain: CGDisplayIsMain(display.displayID) != 0,
-                safeAreaTop: safeAreaTop(for: display.displayID)
+                safeAreaTop: Double(screen?.safeAreaInsets.top ?? 0),
+                screenX: Double(screen?.frame.origin.x ?? 0),
+                screenY: Double(screen?.frame.origin.y ?? 0),
+                screenWidth: Double(screen?.frame.width ?? 0),
+                screenHeight: Double(screen?.frame.height ?? 0)
             )
         }
     }

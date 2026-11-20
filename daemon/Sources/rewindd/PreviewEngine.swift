@@ -58,6 +58,31 @@ final class PreviewEngine {
         return try pixels(of: buffer, width: width)
     }
 
+    /// Thumbnails come from keyframes, which decode without their neighbours.
+    /// Resetting between them is what keeps a strip of 24 at 24 decodes rather
+    /// than decoding every frame between the first and the last.
+    func thumbnails(frames: [CMSampleBuffer], indices: [Int], width: Int) throws -> [RawImage] {
+        var images: [RawImage] = []
+        images.reserveCapacity(indices.count)
+        for index in indices {
+            resetDecoder()
+            images.append(try frame(frames: frames, index: index, width: width))
+        }
+        return images
+    }
+
+    private func resetDecoder() {
+        lock.lock()
+        defer { lock.unlock() }
+        if let session {
+            VTDecompressionSessionInvalidate(session)
+        }
+        session = nil
+        format = nil
+        decodedTime = nil
+        decodedBuffer = nil
+    }
+
     private func decode(frames: [CMSampleBuffer], through target: Int) throws {
         guard let first = frames.first, let description = CMSampleBufferGetFormatDescription(first)
         else {

@@ -16,6 +16,7 @@ const MAXIMUM_FRAME_SIZE: usize = 64 * 1024 * 1024;
 /// Matches `RewindKit.Reply.imageKind` / `jsonKind`.
 const KIND_JSON: u8 = 0;
 const KIND_IMAGE: u8 = 1;
+const KIND_IMAGES: u8 = 2;
 
 #[derive(Debug, Clone)]
 pub struct RawImage {
@@ -29,6 +30,7 @@ pub struct RawImage {
 pub enum Reply {
     Json(Response),
     Image(RawImage),
+    Images(Vec<RawImage>),
 }
 
 #[derive(Debug)]
@@ -143,6 +145,39 @@ fn decode(body: Vec<u8>) -> Result<Reply, Error> {
             }))
         }
 
+        KIND_IMAGES => {
+            if buffer.len() < 5 {
+                return Err(Error::Malformed);
+            }
+            let payload = &buffer[1..];
+            let count = u32::from_be_bytes(payload[0..4].try_into().expect("4 bytes")) as usize;
+            let mut offset = 4;
+            let mut images = Vec::with_capacity(count);
+            for _ in 0..count {
+                if payload.len() < offset + 8 {
+                    return Err(Error::Malformed);
+                }
+                let width = u32::from_be_bytes(
+                    payload[offset..offset + 4].try_into().expect("4 bytes"),
+                );
+                let height = u32::from_be_bytes(
+                    payload[offset + 4..offset + 8].try_into().expect("4 bytes"),
+                );
+                offset += 8;
+                let size = width as usize * height as usize * 4;
+                if payload.len() < offset + size {
+                    return Err(Error::Malformed);
+                }
+                images.push(RawImage {
+                    width,
+                    height,
+                    pixels: payload[offset..offset + size].to_vec(),
+                });
+                offset += size;
+            }
+            Ok(Reply::Images(images))
+        }
+
         _ => Err(Error::Malformed),
     }
 }
@@ -155,6 +190,6 @@ pub fn call(client: &Client, request: Request) -> Result<Response, Error> {
             (false, Some(message)) => Err(Error::Rejected(message.clone())),
             (false, None) => Err(Error::Malformed),
         },
-        Reply::Image(_) => Err(Error::UnexpectedReply),
+        Reply::Image(_) | Reply::Images(_) => Err(Error::UnexpectedReply),
     }
 }

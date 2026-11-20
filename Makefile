@@ -3,7 +3,13 @@ DEBUG := $(DAEMON)/.build/debug
 RELEASE := $(DAEMON)/.build/release
 BUNDLE := dist/Rewind.app
 
-.PHONY: build ui ui-release daemon run bundle install uninstall status list doctor measure clean
+# Ad-hoc signatures change every build, which makes macOS ask for Screen
+# Recording again each time. If a local identity exists it is used
+# automatically; create one with: make signing-identity
+LOCAL_IDENTITY := $(shell security find-identity -p codesigning 2>/dev/null | sed -n 's/.*"\(Rewind Local Signing\)".*/\1/p' | head -1)
+SIGN_IDENTITY ?= $(if $(LOCAL_IDENTITY),$(LOCAL_IDENTITY),-)
+
+.PHONY: build ui ui-release daemon run bundle install uninstall signing-identity status list doctor measure clean
 
 # The daemon launches rewind-ui from its own directory, so the two binaries
 # have to sit next to each other in development too.
@@ -41,8 +47,11 @@ bundle: ui-release
 	@cp $(RELEASE)/rewindd $(BUNDLE)/Contents/MacOS/Rewind
 	@cp ui/target/release/rewind-ui $(BUNDLE)/Contents/MacOS/rewind-ui
 	@cp resources/Info.plist $(BUNDLE)/Contents/Info.plist
-	@codesign --force --sign - $(BUNDLE)
+	@codesign --force --sign "$(SIGN_IDENTITY)" $(BUNDLE)
 	@echo "built $(BUNDLE)"
+
+signing-identity:
+	@./scripts/signing-identity.sh
 
 APP := /Applications/Rewind.app
 
@@ -58,7 +67,11 @@ install: bundle
 	@echo "installed $(APP)"
 	@"$(APP)/Contents/MacOS/Rewind" login-item on || echo "could not register the login item; toggle 'Start at Login' in the menu bar"
 	@open "$(APP)"
-	@echo "Rewind is running. macOS will ask for Screen Recording once — allow it, then reopen the overlay."
+	@echo "Rewind is running."
+	@if [ "$(SIGN_IDENTITY)" = "-" ]; then \
+		echo "Signed ad-hoc: macOS will ask for Screen Recording after every rebuild."; \
+		echo "Run 'make signing-identity' once, then 'make install SIGN_IDENTITY=\"Rewind Local Signing\"'."; \
+	fi
 
 uninstall:
 	@"$(APP)/Contents/MacOS/Rewind" login-item off 2>/dev/null || true
