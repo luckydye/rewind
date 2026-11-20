@@ -49,18 +49,20 @@ public struct IPCClient {
         let payload = try JSONEncoder().encode(request)
         SocketIO.writeAll(fd, Frame.encode(payload))
 
-        var decoder = FrameDecoder()
-        while true {
-            guard let chunk = SocketIO.readUpTo(fd, 64 * 1024) else {
-                throw IPCError.receiveFailed
-            }
-            let frames = try decoder.append(chunk)
-            guard let frame = frames.first else { continue }
-            do {
-                return try Reply.decode(frame)
-            } catch {
-                throw IPCError.decodeFailed
-            }
+        guard let header = SocketIO.readExactly(fd, 4) else {
+            throw IPCError.receiveFailed
+        }
+        let length = Int(header.readBigEndianUInt32(at: 0))
+        guard length > 0, length <= Frame.maximumSize else {
+            throw IPCError.receiveFailed
+        }
+        guard let body = SocketIO.readExactly(fd, length) else {
+            throw IPCError.receiveFailed
+        }
+        do {
+            return try Reply.decode(body)
+        } catch {
+            throw IPCError.decodeFailed
         }
     }
 }

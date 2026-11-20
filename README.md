@@ -167,8 +167,9 @@ Measured at 1662×1080 on an idle-ish desktop:
 | | round trip |
 |---|---|
 | scrub forward, 0.1 s steps | 12–14 ms |
-| scrub backward, jumping GOPs | 15–20 ms |
-| first request after a cold start | ~40 ms |
+| same frame repeatedly (static screen) | 14–32 ms |
+| scrub backward, jumping GOPs | 15–95 ms, depending on GOP distance |
+| first request after the decoder is cold | 40–240 ms, session creation |
 
 Two things made that possible, and both were worth more than the transport:
 keyframe search walks backwards instead of scanning 1800 frames calling

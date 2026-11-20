@@ -71,7 +71,10 @@ final class PreviewEngine {
         if let decodedTime, let existing = frames.firstIndex(where: {
             CMTimeCompare($0.presentationTimeStamp, decodedTime) == 0
         }) {
-            if existing >= startIndex && existing < target {
+            // A static screen has no frames between two scrub positions, so the
+            // same frame is asked for repeatedly. Resetting on `existing ==
+            // target` would re-decode a whole GOP for every request.
+            if existing >= startIndex && existing <= target {
                 startIndex = existing + 1
             } else {
                 reset(format: description)
@@ -80,6 +83,7 @@ final class PreviewEngine {
             reset(format: description)
         }
 
+        guard startIndex <= target else { return }
         for index in startIndex...target {
             try decode(frame: frames[index])
         }

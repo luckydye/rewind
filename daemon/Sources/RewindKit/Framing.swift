@@ -74,6 +74,28 @@ public enum SocketIO {
         }
     }
 
+    /// Reads exactly `count` bytes. Used for reply bodies, which can be several
+    /// megabytes: accumulating them in chunks costs more than the transfer.
+    public static func readExactly(_ fd: Int32, _ count: Int) -> Data? {
+        var data = Data(count: count)
+        let complete = data.withUnsafeMutableBytes { raw -> Bool in
+            guard let base = raw.baseAddress else { return count == 0 }
+            var offset = 0
+            while offset < count {
+                let bytes = read(fd, base + offset, count - offset)
+                if bytes > 0 {
+                    offset += bytes
+                } else if bytes < 0 && errno == EINTR {
+                    continue
+                } else {
+                    return false
+                }
+            }
+            return true
+        }
+        return complete ? data : nil
+    }
+
     public static func readUpTo(_ fd: Int32, _ count: Int) -> Data? {
         var buffer = [UInt8](repeating: 0, count: count)
         let bytes = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, count) }
