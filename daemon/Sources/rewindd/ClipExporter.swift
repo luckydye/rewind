@@ -28,6 +28,9 @@ struct ExportResult {
 /// Export is user-initiated, so a blocking write on a background queue is fine.
 enum ClipExporter {
     static func write(frames: [CMSampleBuffer], to url: URL) throws -> ExportResult {
+        // AVFoundation objects are autoreleased and this runs off the main
+        // thread, so give them a pool to drain into.
+        try autoreleasepool {
         guard let first = frames.first, let last = frames.last else {
             throw ClipExportError.emptyClip
         }
@@ -79,6 +82,7 @@ enum ClipExporter {
             duration: last.presentationTimeStamp.seconds - first.presentationTimeStamp.seconds,
             bytes: (attributes[.size] as? Int) ?? 0
         )
+        }
     }
 
     private final class Feeder {

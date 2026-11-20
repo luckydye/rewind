@@ -1,4 +1,6 @@
 import AppKit
+import ImageIO
+import UniformTypeIdentifiers
 import CoreGraphics
 import Foundation
 import RewindKit
@@ -62,6 +64,10 @@ enum Clipboard {
     /// apps paste.
     @MainActor
     static func copy(_ image: RawImage) throws {
+        // These are AppKit/CoreGraphics objects from an async task, which has no
+        // autorelease pool of its own: without this, every copy left its
+        // bitmap, TIFF and PNG behind (~23 MB each).
+        try autoreleasepool {
         guard
             let provider = CGDataProvider(data: image.pixels as CFData),
             let cgImage = CGImage(
@@ -84,18 +90,30 @@ enum Clipboard {
             throw ClipboardError.imageCreationFailed
         }
 
-        let representation = NSBitmapImageRep(cgImage: cgImage)
+        // PNG only, encoded straight from the CGImage. Going through
+        // NSBitmapImageRep also materialised a full uncompressed TIFF and left
+        // ~30 MB behind per copy.
+        let data = NSMutableData()
         guard
-            let png = representation.representation(using: .png, properties: [:]),
-            let tiff = representation.tiffRepresentation
+            let destination = CGImageDestinationCreateWithData(
+                data as CFMutableData,
+                UTType.png.identifier as CFString,
+                1,
+                nil
+            )
         else {
+            throw ClipboardError.encodingFailed
+        }
+        CGImageDestinationAddImage(destination, cgImage, nil)
+        guard CGImageDestinationFinalize(destination) else {
             throw ClipboardError.encodingFailed
         }
 
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        guard pasteboard.setData(png, forType: .png), pasteboard.setData(tiff, forType: .tiff) else {
+        guard pasteboard.setData(data as Data, forType: .png) else {
             throw ClipboardError.writeFailed
+        }
         }
     }
 }
