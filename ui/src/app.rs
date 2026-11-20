@@ -22,7 +22,7 @@ use crate::protocol::{ClipRange, Command, Request};
 
 const MARGIN: f32 = 24.0;
 const GAP: f32 = 16.0;
-const BAR_HEIGHT: f32 = 152.0;
+const BAR_HEIGHT: f32 = 128.0;
 const BAR_PADDING: f32 = 16.0;
 
 /// Room for half a tick label beyond each end of the track, so "-0s" is not
@@ -32,15 +32,15 @@ const LABEL_WIDTH: f32 = 44.0;
 
 /// Toolbar row: grouped controls in recessed pills.
 const TOOLBAR_Y: f32 = 10.0;
-const TOOLBAR_H: f32 = 44.0;
+const TOOLBAR_H: f32 = 30.0;
 
 /// Ruler: bare numbers on the panel, with the playhead badge riding on it.
-const RULER_Y: f32 = 62.0;
-const RULER_H: f32 = 26.0;
+const RULER_Y: f32 = 48.0;
+const RULER_H: f32 = 24.0;
 
 /// Content row: the recessed strip the range block lives in.
-const ROW_Y: f32 = 94.0;
-const ROW_H: f32 = 44.0;
+const ROW_Y: f32 = 78.0;
+const ROW_H: f32 = 38.0;
 const BLOCK_INSET: f32 = 5.0;
 
 const HANDLE_REACH: f32 = 10.0;
@@ -607,7 +607,6 @@ impl Rewind {
             ))
             .child(
                 icon_button(if self.playing { "❚❚" } else { "▶" })
-                    .text_sm()
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|view, _: &MouseDownEvent, _window, cx| view.toggle_play(cx)),
@@ -629,12 +628,12 @@ impl Rewind {
             .child(transport)
             .child(
                 div()
-                    .text_sm()
+                    .text_xs()
                     .text_color(rgba(MUTED))
                     .child(format!("{:.1}s selected", self.selection_duration())),
             );
         if !status_text.is_empty() {
-            left = left.child(div().text_sm().text_color(status_colour).child(status_text));
+            left = left.child(div().text_xs().text_color(status_colour).child(status_text));
         }
 
         let mut secondary = group();
@@ -802,8 +801,8 @@ fn panel() -> Div {
 fn group() -> Div {
     div()
         .h(px(TOOLBAR_H))
-        .px(px(4.0))
-        .rounded(px(14.0))
+        .px(px(2.0))
+        .rounded(px(9.0))
         .bg(rgba(GROUP))
         .flex()
         .items_center()
@@ -812,9 +811,9 @@ fn group() -> Div {
 
 fn icon_button(glyph: &'static str) -> Div {
     div()
-        .w(px(36.0))
-        .h(px(36.0))
-        .rounded(px(10.0))
+        .w(px(28.0))
+        .h(px(26.0))
+        .rounded(px(7.0))
         .flex()
         .items_center()
         .justify_center()
@@ -827,12 +826,12 @@ fn icon_button(glyph: &'static str) -> Div {
 
 fn label_button(label: &'static str) -> Div {
     div()
-        .h(px(36.0))
-        .px(px(14.0))
-        .rounded(px(10.0))
+        .h(px(26.0))
+        .px(px(10.0))
+        .rounded(px(7.0))
         .flex()
         .items_center()
-        .text_sm()
+        .text_xs()
         .text_color(rgba(TEXT))
         .cursor_pointer()
         .hover(|style| style.bg(rgba(0xFFFFFF14)))
