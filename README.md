@@ -143,22 +143,32 @@ Clips default to `~/Movies/Rewind/`.
 
 `Cmd+Shift+S` (registered by the daemon with Carbon's `RegisterEventHotKey`,
 which needs no accessibility permission) spawns `rewind-ui`. It opens a
-full-screen, transparent, `PopUp`-level window over everything: the desktop is
-dimmed, the frame under the playhead sits in the middle, and a floating toolbar
-sits at the bottom like the macOS screenshot tool.
+full-screen, transparent window above the menu bar: the desktop is dimmed, the
+frame under the playhead fills the middle, and a single floating bar at the
+bottom carries the transport, the readout, the actions and the timeline.
+
+Three things, on purpose. The capture source, the recent clips and the export
+destination live in the menu bar item; an earlier version repeated all of them
+inside the overlay as status pills and a side panel, which was decoration.
 
 | input | |
 |---|---|
-| drag the timeline | scrub; the preview follows |
+| drag the timeline | scrub; the preview follows (the playhead stays inside the range) |
 | drag a handle | set the export range |
 | Space | play the selection, looping |
 | ← / → | nudge the playhead |
 | Return | export |
 | Escape | close |
 
-Export writes to `~/Movies/Rewind/` and reveals the file in Finder.
+Export writes to `~/Movies/Rewind/`; the bar then offers a Reveal button rather
+than opening Finder unprompted, because stealing focus would break Escape.
 
-Two things are non-obvious in the implementation:
+The overlay is excluded from screen capture (`NSWindowSharingNone`), so the
+recorder never films itself and the preview cannot recurse into a picture-in-
+picture of itself. Build with `REWIND_OVERLAY_CAPTURABLE=1` to lift that while
+debugging the overlay itself.
+
+Three things are non-obvious in the implementation:
 
 - **The window cannot be laid out with nested flex containers.** The timeline
   has to turn a window-space mouse position into a timestamp, so its geometry
@@ -168,6 +178,8 @@ Two things are non-obvious in the implementation:
   rounded corners, and content pushed down by a titlebar. `ui/src/activate.rs`
   strips the style mask to `Borderless` and pins the frame to the display.
   A plain `titlebar: None` is not enough — GPUI still creates a titled window.
+- **The window has to be raised above the menu bar.** GPUI's `PopUp` kind sits
+  under it, which left a live menu bar above the dimmed screen.
 - **Activation has to be done by hand, twice.** GPUI 0.2.2 calls
   `-[NSApplication activateIgnoringOtherApps:]`, a no-op since macOS 14, so the
   overlay drew above everything while every keystroke went to the app that was

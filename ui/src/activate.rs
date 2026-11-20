@@ -72,6 +72,20 @@ pub fn make_borderless(width: f32, height: f32) {
         let set_style: SendUnsigned = std::mem::transmute(objc_msgSend as *const ());
         set_style(window, selector(c"setStyleMask:"), 0);
 
+        let set_unsigned: SendUnsigned = std::mem::transmute(objc_msgSend as *const ());
+
+        // NSStatusWindowLevel: above the menu bar, so the overlay is genuinely
+        // in front of everything rather than floating under it.
+        set_unsigned(window, selector(c"setLevel:"), 25);
+
+        // NSWindowSharingNone: excluded from screen capture, so the recorder
+        // never films its own overlay and the preview cannot recurse into
+        // itself. REWIND_OVERLAY_CAPTURABLE=1 lifts that for screenshots while
+        // debugging the overlay itself.
+        if std::env::var_os("REWIND_OVERLAY_CAPTURABLE").is_none() {
+            set_unsigned(window, selector(c"setSharingType:"), 0);
+        }
+
         let set_pair: SendPair = std::mem::transmute(objc_msgSend as *const ());
         set_pair(window, selector(c"setContentSize:"), width as f64, height as f64);
 
