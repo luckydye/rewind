@@ -10,7 +10,7 @@
 //! timestamp and that only stays correct if the geometry is explicit.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::*;
@@ -22,17 +22,24 @@ use crate::protocol::{ClipRange, Command, Request};
 
 const MARGIN: f32 = 24.0;
 const GAP: f32 = 16.0;
-const BAR_HEIGHT: f32 = 112.0;
-const BAR_PADDING: f32 = 18.0;
+const BAR_HEIGHT: f32 = 144.0;
+const BAR_PADDING: f32 = 16.0;
 
 /// Room for half a tick label beyond each end of the track, so "-0s" is not
 /// clipped by the bar's right edge.
 const RULER_INSET: f32 = 32.0;
 const LABEL_WIDTH: f32 = 44.0;
 
-const TRACK_Y: f32 = 76.0;
-const TRACK_H: f32 = 8.0;
-const HANDLE_REACH: f32 = 12.0;
+/// Ruler band: tick numbers on their own strip, like a timeline header.
+const RULER_Y: f32 = 52.0;
+const RULER_H: f32 = 30.0;
+
+/// Content row: the recessed strip the selection block lives in.
+const ROW_Y: f32 = 92.0;
+const ROW_H: f32 = 38.0;
+const BLOCK_H: f32 = 22.0;
+
+const HANDLE_REACH: f32 = 13.0;
 
 /// Capture is native-resolution (33 MB per frame on a 4K display). A 2K preview
 /// costs ~11 MB and about 40 ms round trip, which keeps scrubbing usable; the
@@ -43,20 +50,23 @@ const PREVIEW_WIDTH: i64 = 2048;
 
 const SCRIM: u32 = 0x08080CDB;
 const PANEL: u32 = 0x1B1B1EF5;
+const SUNKEN: u32 = 0x0D0D0FFF;
 const BORDER: u32 = 0xFFFFFF12;
 const TEXT: u32 = 0xE9E9EDFF;
 const MUTED: u32 = 0x8A8A93FF;
 const ACCENT: u32 = 0x2F7CF6FF;
-const ACCENT_SOFT: u32 = 0x2F7CF64D;
 const DANGER: u32 = 0xFF5A4DFF;
 const PENDING: u32 = 0xF0A030FF;
-const TRACK: u32 = 0xFFFFFF1A;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Drag {
     Playhead,
     From,
     To,
+    /// Moving the whole selection. The range is moved by the cursor's offset
+    /// from where the drag started, applied to the range as it was then, so
+    /// its length cannot drift while dragging.
+    Range { anchor: f64, from: f64, to: f64 },
 }
 
 enum Status {
@@ -80,6 +90,10 @@ pub struct Rewind {
     exporting: bool,
     status: Option<Status>,
     ticker: Option<Task<()>>,
+    /// Wall clock of the previous playback tick. Advance is derived from the
+    /// time actually elapsed rather than from a tick count, so a late or early
+    /// timer cannot speed playback up or slow it down.
+    playback_clock: Option<Instant>,
     activated: bool,
     last_clip: Option<String>,
 }
@@ -118,6 +132,7 @@ impl Rewind {
             exporting: false,
             status,
             ticker: None,
+            playback_clock: None,
             activated: false,
             last_clip: None,
         };
@@ -142,40 +157,30 @@ impl Rewind {
         (self.sel_from - self.sel_to).max(0.0)
     }
 
-    fn position_in_selection(&self) -> f64 {
-        (self.sel_from - self.playhead).clamp(0.0, self.selection_duration())
-    }
 
-    /// The playhead belongs to the range being exported; letting it drift
-    /// outside made the readout clamp to zero and disagree with the timeline.
-    fn clamp_playhead(&mut self) {
-        self.playhead = self.playhead.clamp(self.sel_to, self.sel_from);
-    }
-
+    /// The playhead seeks anywhere in the buffer; the range is what is
+    /// exported. Clamping the playhead into the range made clicking outside it
+    /// do nothing at all.
     fn set_playhead(&mut self, seconds: f64, cx: &mut Context<Self>) {
-        self.playhead = seconds;
-        self.clamp_playhead();
+        self.playhead = seconds.clamp(0.0, self.span);
         self.request_frame(cx);
         cx.notify();
     }
 
     fn nudge(&mut self, delta: f64, cx: &mut Context<Self>) {
-        self.playing = false;
-        self.ticker = None;
+        self.stop_playback();
         // Left is earlier on the timeline, i.e. further back in time.
         let next = self.playhead + delta;
         self.set_playhead(next, cx);
     }
 
     fn jump_to_start(&mut self, cx: &mut Context<Self>) {
-        self.playing = false;
-        self.ticker = None;
+        self.stop_playback();
         self.set_playhead(self.sel_from, cx);
     }
 
     fn jump_to_end(&mut self, cx: &mut Context<Self>) {
-        self.playing = false;
-        self.ticker = None;
+        self.stop_playback();
         self.set_playhead(self.sel_to, cx);
     }
 
@@ -189,22 +194,25 @@ impl Rewind {
 
     // MARK: - Playback
 
+    fn stop_playback(&mut self) {
+        self.playing = false;
+        self.ticker = None;
+        self.playback_clock = None;
+    }
+
     fn toggle_play(&mut self, cx: &mut Context<Self>) {
-        self.playing = !self.playing;
-        if !self.playing {
-            self.ticker = None;
+        if self.playing {
+            self.stop_playback();
             cx.notify();
             return;
         }
 
-        if self.playhead <= self.sel_to + 0.001 {
-            self.playhead = self.sel_from;
-        }
-
+        self.playing = true;
+        self.playback_clock = Some(Instant::now());
         self.ticker = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(33))
+                    .timer(Duration::from_millis(16))
                     .await;
 
                 let keep_going = this
@@ -212,10 +220,22 @@ impl Rewind {
                         if !view.playing {
                             return false;
                         }
-                        view.playhead -= 1.0 / 30.0;
+
+                        let now = Instant::now();
+                        let elapsed = view
+                            .playback_clock
+                            .map(|clock| now.duration_since(clock).as_secs_f64())
+                            .unwrap_or(0.0);
+                        view.playback_clock = Some(now);
+
+                        view.playhead -= elapsed;
                         if view.playhead < view.sel_to {
-                            view.playhead = view.sel_from;
+                            // Carry the overshoot so looping does not drift.
+                            let overshoot = view.sel_to - view.playhead;
+                            let duration = view.selection_duration().max(0.01);
+                            view.playhead = view.sel_from - (overshoot % duration);
                         }
+
                         view.request_frame(cx);
                         cx.notify();
                         true
@@ -308,8 +328,7 @@ impl Rewind {
         }
 
         self.exporting = true;
-        self.playing = false;
-        self.ticker = None;
+        self.stop_playback();
         self.status = Some(Status::Info("rendering…".into()));
 
         let range = ClipRange {
@@ -367,8 +386,7 @@ impl Rewind {
     }
 
     fn timeline_down(&mut self, x: f32, left: f32, width: f32, cx: &mut Context<Self>) {
-        self.playing = false;
-        self.ticker = None;
+        self.stop_playback();
 
         let to_handle = (x - self.x_of(self.sel_to, left, width)).abs();
         let from_handle = (x - self.x_of(self.sel_from, left, width)).abs();
@@ -378,10 +396,19 @@ impl Rewind {
         } else if from_handle <= HANDLE_REACH {
             self.drag = Some(Drag::From);
         } else {
-            self.drag = Some(Drag::Playhead);
-            self.playhead = self.time_at(x, left, width);
-            self.clamp_playhead();
-            self.request_frame(cx);
+            let seconds = self.time_at(x, left, width);
+            if seconds <= self.sel_from && seconds >= self.sel_to {
+                // Inside the range: move the whole block.
+                self.drag = Some(Drag::Range {
+                    anchor: seconds,
+                    from: self.sel_from,
+                    to: self.sel_to,
+                });
+            } else {
+                self.drag = Some(Drag::Playhead);
+                self.playhead = seconds;
+                self.request_frame(cx);
+            }
         }
         cx.notify();
     }
@@ -393,16 +420,18 @@ impl Rewind {
         match drag {
             Drag::Playhead => {
                 self.playhead = seconds;
-                self.clamp_playhead();
                 self.request_frame(cx);
             }
             Drag::From => {
                 self.sel_from = seconds.clamp(self.sel_to + 0.1, self.span);
-                self.clamp_playhead();
             }
             Drag::To => {
                 self.sel_to = seconds.clamp(0.0, self.sel_from - 0.1);
-                self.clamp_playhead();
+            }
+            Drag::Range { anchor, from, to } => {
+                let delta = (seconds - anchor).clamp(-to, self.span - from);
+                self.sel_from = from + delta;
+                self.sel_to = to + delta;
             }
         }
         cx.notify();
@@ -425,13 +454,24 @@ impl Render for Rewind {
             .detach();
         }
 
+        // Nothing else in the overlay is focusable, and the window can lose key
+        // status when another app activates itself, which silently drops Space,
+        // Enter and Escape. Re-assert focus on every frame.
+        if !self.focus.is_focused(window) {
+            window.focus(&self.focus);
+        }
+
         let viewport = window.viewport_size();
         let width: f32 = viewport.width.into();
         let height: f32 = viewport.height.into();
 
         let bar_top = height - MARGIN - BAR_HEIGHT;
         let bar_width = width - MARGIN * 2.0;
-        let track_left = MARGIN + BAR_PADDING + RULER_INSET;
+        // track_left is relative to the bar (used for layout); track_origin is
+        // absolute in the window (used for pointer maths). Mixing the two put
+        // the playhead a bar-margin away from the cursor.
+        let track_left = BAR_PADDING + RULER_INSET;
+        let track_origin = MARGIN + track_left;
         let track_width = (bar_width - (BAR_PADDING + RULER_INSET) * 2.0).max(1.0);
 
         let stage_left = MARGIN;
@@ -494,17 +534,33 @@ impl Render for Rewind {
                 .into_any_element(),
         };
 
+        // Moves and releases are handled on the root, which covers the whole
+        // window, so a drag keeps tracking after the pointer leaves the bar.
         div()
             .relative()
             .size_full()
             .bg(rgba(SCRIM))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .on_mouse_move(cx.listener(move |view, event: &MouseMoveEvent, _window, cx| {
+                if view.drag.is_some() && event.pressed_button == Some(MouseButton::Left) {
+                    view.timeline_drag(event.position.x.into(), track_origin, track_width, cx)
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseUpEvent, _window, cx| {
+                    if view.drag.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .child(stage)
             .child(self.transport_bar(
                 bar_top,
                 bar_width,
                 track_left,
+                track_origin,
                 track_width,
                 from_x,
                 to_x,
@@ -523,6 +579,7 @@ impl Rewind {
         bar_top: f32,
         bar_width: f32,
         track_left: f32,
+        track_origin: f32,
         track_width: f32,
         from_x: f32,
         to_x: f32,
@@ -534,6 +591,7 @@ impl Rewind {
             Some(Status::Error(text)) => (text.clone(), rgba(DANGER)),
             None => (String::new(), rgba(MUTED)),
         };
+        let band_width = bar_width - BAR_PADDING * 2.0;
 
         let mut bar = panel()
             .absolute()
@@ -541,12 +599,33 @@ impl Rewind {
             .top(px(bar_top))
             .w(px(bar_width))
             .h(px(BAR_HEIGHT))
+            // Ruler strip and content row, both recessed.
+            .child(
+                div()
+                    .absolute()
+                    .left(px(BAR_PADDING))
+                    .top(px(RULER_Y))
+                    .w(px(band_width))
+                    .h(px(RULER_H))
+                    .rounded(px(10.0))
+                    .bg(rgba(SUNKEN)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(BAR_PADDING))
+                    .top(px(ROW_Y))
+                    .w(px(band_width))
+                    .h(px(ROW_H))
+                    .rounded(px(10.0))
+                    .bg(rgba(SUNKEN)),
+            )
             // Transport
             .child(
                 div()
                     .absolute()
                     .left(px(BAR_PADDING))
-                    .top(px(12.0))
+                    .top(px(10.0))
                     .flex()
                     .items_center()
                     .gap(px(6.0))
@@ -556,8 +635,8 @@ impl Rewind {
                     ))
                     .child(
                         transport_button(if self.playing { "❚❚" } else { "▶" })
-                            .bg(rgba(ACCENT_SOFT))
-                            .text_color(rgba(ACCENT))
+                            .bg(rgba(ACCENT))
+                            .text_color(rgba(0xFFFFFFFF))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|view, _: &MouseDownEvent, _window, cx| {
@@ -575,8 +654,8 @@ impl Rewind {
                             .text_sm()
                             .text_color(rgba(TEXT))
                             .child(format!(
-                                "{:.1}s / {:.1}s",
-                                self.position_in_selection(),
+                                "-{:.1}s · {:.1}s range",
+                                self.playhead,
                                 self.selection_duration()
                             )),
                     ),
@@ -586,7 +665,7 @@ impl Rewind {
             bar = bar.child(
                 div()
                     .absolute()
-                    .left(px(BAR_PADDING + 296.0))
+                    .left(px(BAR_PADDING + 300.0))
                     .top(px(20.0))
                     .text_xs()
                     .text_color(status_colour)
@@ -597,7 +676,7 @@ impl Rewind {
         let mut actions = div()
             .absolute()
             .right(px(BAR_PADDING))
-            .top(px(12.0))
+            .top(px(10.0))
             .flex()
             .items_center()
             .gap(px(8.0));
@@ -628,32 +707,22 @@ impl Rewind {
                             ),
                     )
                     .child(
-                        transport_button("✕")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|_view, _: &MouseDownEvent, _window, cx| cx.quit()),
-                            ),
+                        transport_button("✕").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_view, _: &MouseDownEvent, _window, cx| cx.quit()),
+                        ),
                     ),
             )
             .child(self.ruler(track_left, track_width))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(track_left))
-                    .top(px(TRACK_Y))
-                    .w(px(track_width))
-                    .h(px(TRACK_H))
-                    .rounded_full()
-                    .bg(rgba(TRACK)),
-            )
+            // The selection block. Its body is the drag handle for the range.
             .child(
                 div()
                     .absolute()
                     .left(px(from_x))
-                    .top(px(TRACK_Y))
+                    .top(px(ROW_Y + (ROW_H - BLOCK_H) / 2.0))
                     .w(px((to_x - from_x).max(1.0)))
-                    .h(px(TRACK_H))
-                    .rounded_full()
+                    .h(px(BLOCK_H))
+                    .rounded(px(6.0))
                     .bg(rgba(ACCENT)),
             )
             .child(handle(from_x))
@@ -662,35 +731,30 @@ impl Rewind {
                 div()
                     .absolute()
                     .left(px(playhead_x - 1.0))
-                    .top(px(TRACK_Y - 6.0))
+                    .top(px(ROW_Y + 5.0))
                     .w(px(2.0))
-                    .h(px(TRACK_H + 12.0))
+                    .h(px(ROW_H - 10.0))
                     .rounded_full()
                     .bg(rgba(TEXT)),
             )
             .child(
+                // Everything below the transport row seeks: the ruler strip and
+                // the content row together.
                 div()
                     .absolute()
-                    .left(px(track_left))
-                    .top(px(TRACK_Y - 14.0))
-                    .w(px(track_width))
-                    .h(px(TRACK_H + 28.0))
+                    .left(px(0.0))
+                    .top(px(RULER_Y - 4.0))
+                    .w(px(bar_width))
+                    .h(px(BAR_HEIGHT - RULER_Y + 4.0))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
-                            view.timeline_down(event.position.x.into(), track_left, track_width, cx)
-                        }),
-                    )
-                    .on_mouse_move(
-                        cx.listener(move |view, event: &MouseMoveEvent, _window, cx| {
-                            view.timeline_drag(event.position.x.into(), track_left, track_width, cx)
-                        }),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|view, _: &MouseUpEvent, _window, cx| {
-                            view.drag = None;
-                            cx.notify();
+                            view.timeline_down(
+                                event.position.x.into(),
+                                track_origin,
+                                track_width,
+                                cx,
+                            )
                         }),
                     ),
             );
@@ -698,14 +762,14 @@ impl Rewind {
         bar.into_any_element()
     }
 
-    /// Labels are centred on their tick in a fixed-width box, which is what
-    /// keeps the last one inside the bar instead of hanging off the edge.
+    /// Numbers are centred on their tick in a fixed-width box, which keeps the
+    /// last one inside the bar instead of hanging off the edge.
     fn ruler(&self, track_left: f32, track_width: f32) -> AnyElement {
         let step = ruler_step(self.span);
         let mut ruler = div()
             .absolute()
             .left(px(track_left))
-            .top(px(48.0))
+            .top(px(RULER_Y + 7.0))
             .h(px(18.0))
             .w(px(track_width));
 
@@ -721,8 +785,6 @@ impl Rewind {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap(px(4.0))
-                    .child(div().w(px(1.0)).h(px(3.0)).bg(rgba(0xFFFFFF26)))
                     .child(
                         div()
                             .text_xs()
@@ -750,16 +812,17 @@ fn panel() -> Div {
 
 fn transport_button(glyph: &'static str) -> Div {
     div()
-        .w(px(36.0))
-        .h(px(30.0))
-        .rounded(px(9.0))
+        .w(px(34.0))
+        .h(px(34.0))
+        .rounded(px(10.0))
+        .bg(rgba(0xFFFFFF0D))
         .flex()
         .items_center()
         .justify_center()
         .text_xs()
         .text_color(rgba(TEXT))
         .cursor_pointer()
-        .hover(|style| style.bg(rgba(0xFFFFFF14)))
+        .hover(|style| style.bg(rgba(0xFFFFFF1F)))
         .child(glyph)
 }
 
@@ -780,7 +843,7 @@ fn handle(x: f32) -> AnyElement {
     div()
         .absolute()
         .left(px(x - 7.0))
-        .top(px(TRACK_Y - 3.0))
+        .top(px(ROW_Y + (ROW_H - 14.0) / 2.0))
         .w(px(14.0))
         .h(px(14.0))
         .rounded_full()
