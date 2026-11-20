@@ -11,8 +11,21 @@ fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
 
     if arguments.is_empty() {
-        app::run();
+        app::run(false);
         return;
+    }
+    match arguments[0].as_str() {
+        // The daemon preloads the overlay hidden; --show is the fallback when
+        // no resident instance is listening.
+        "--resident" => {
+            app::run(false);
+            return;
+        }
+        "--show" => {
+            app::run(true);
+            return;
+        }
+        _ => {}
     }
 
     if let Err(message) = run_cli(&arguments) {

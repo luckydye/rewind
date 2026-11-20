@@ -118,43 +118,24 @@ pub struct Rewind {
     /// time actually elapsed rather than from a tick count, so a late or early
     /// timer cannot speed playback up or slow it down.
     playback_clock: Option<Instant>,
-    activated: bool,
     last_clip: Option<String>,
-    /// A close is in flight: the frame is being copied before the overlay exits.
+    /// A close is in flight: the frame is being copied before the overlay hides.
     closing: bool,
-    /// The last copy failed; the next close exits without trying again, so a
+    /// The last copy failed; the next close hides without trying again, so a
     /// dead daemon cannot trap the user in the overlay.
     copy_failed: bool,
 }
 
 impl Rewind {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let client = Client::new();
-        let response = ipc::call(&client, Request::new(Command::Status));
-        let state = response
-            .as_ref()
-            .ok()
-            .and_then(|response| response.state.as_ref());
-
-        let span = state
-            .map(|state| state.available_seconds.max(0.5))
-            .unwrap_or(1.0);
-        let sel_from = span.min(10.0);
-        let anchor = state.and_then(|state| state.newest_timestamp);
-        let fps = state.map(|state| state.config.fps as f64).unwrap_or(30.0).max(1.0);
-        let status = response
-            .as_ref()
-            .err()
-            .map(|error| Status::Error(error.to_string()));
-
-        let mut view = Self {
+        Self {
             focus: cx.focus_handle(),
-            client,
-            span,
-            anchor,
-            fps,
-            playhead: sel_from,
-            sel_from,
+            client: Client::new(),
+            span: 1.0,
+            anchor: None,
+            fps: 30.0,
+            playhead: 0.0,
+            sel_from: 0.0,
             sel_to: 0.0,
             playing: false,
             frame: None,
@@ -163,17 +144,72 @@ impl Rewind {
             in_flight: false,
             drag: None,
             exporting: false,
-            status,
+            status: None,
             ticker: None,
             playback_clock: None,
-            activated: false,
             last_clip: None,
             closing: false,
             copy_failed: false,
-        };
+        }
+    }
 
-        view.request_frame(cx);
-        view
+    /// Every show starts from the daemon's current buffer: a fresh "now"
+    /// anchor, a fresh default range, and the frame under the playhead.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        let response = ipc::call(&self.client, Request::new(Command::Status));
+        let state = response
+            .as_ref()
+            .ok()
+            .and_then(|response| response.state.as_ref());
+
+        self.span = state
+            .map(|state| state.available_seconds.max(0.5))
+            .unwrap_or(1.0);
+        self.anchor = state.and_then(|state| state.newest_timestamp);
+        self.fps = state
+            .map(|state| state.config.fps as f64)
+            .unwrap_or(30.0)
+            .max(1.0);
+        self.sel_from = self.span.min(10.0);
+        self.sel_to = 0.0;
+        self.playhead = self.sel_from;
+        self.status = response
+            .as_ref()
+            .err()
+            .map(|error| Status::Error(error.to_string()));
+        self.frame = None;
+        self.drag = None;
+        self.closing = false;
+        self.copy_failed = false;
+        self.request_frame(cx);
+        cx.notify();
+    }
+
+    pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh(cx);
+        window.focus(&self.focus);
+        crate::activate::activate();
+        // Activation races window ordering and is sometimes dropped; asserting
+        // it once more shortly after makes the overlay reliably take the keys.
+        cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(120))
+                .await;
+            crate::activate::activate();
+        })
+        .detach();
+    }
+
+    /// The overlay stays resident between uses so the hotkey is instant; this
+    /// is its "close". The frame is dropped so a hidden overlay holds no
+    /// 11 MB image.
+    fn hide(&mut self, cx: &mut Context<Self>) {
+        self.stop_playback();
+        self.frame = None;
+        self.drag = None;
+        self.closing = false;
+        crate::activate::hide();
+        cx.notify();
     }
 
     // MARK: - Timing
@@ -481,7 +517,7 @@ impl Rewind {
     /// resolution, then exits once the daemon confirms.
     fn close(&mut self, cx: &mut Context<Self>) {
         if self.copy_failed {
-            cx.quit();
+            self.hide(cx);
             return;
         }
         if self.closing {
@@ -507,12 +543,12 @@ impl Rewind {
                 .await;
 
             this.update(cx, |view, cx| match result {
-                Ok(_) => cx.quit(),
+                Ok(_) => view.hide(cx),
                 Err(error) => {
                     view.closing = false;
                     view.copy_failed = true;
                     view.status = Some(Status::Error(format!(
-                        "copy failed: {error} — close again to exit"
+                        "copy failed: {error} — close again to dismiss"
                     )));
                     cx.notify();
                 }
@@ -672,18 +708,6 @@ impl Rewind {
 
 impl Render for Rewind {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.activated {
-            self.activated = true;
-            cx.spawn(async move |_, cx| {
-                crate::activate::activate();
-                cx.background_executor()
-                    .timer(Duration::from_millis(120))
-                    .await;
-                crate::activate::activate();
-            })
-            .detach();
-        }
-
         // Nothing else in the overlay is focusable, and the window can lose key
         // status when another app activates itself, which silently drops Space,
         // Enter and Escape. Re-assert focus on every frame.
@@ -1125,8 +1149,32 @@ fn reveal(path: &str) {
 
 // MARK: - Entry
 
-pub fn run() {
-    Application::new().run(|cx| {
+/// Leaves a stale socket file from a killed overlay behind would block the
+/// bind forever, so it is removed unless something actually answers on it.
+fn bind_listener(path: &std::path::Path) -> Option<std::os::unix::net::UnixListener> {
+    if path.exists() {
+        match std::os::unix::net::UnixStream::connect(path) {
+            Ok(_) => return None,
+            Err(_) => {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    std::os::unix::net::UnixListener::bind(path).ok()
+}
+
+fn ui_socket_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").expect("HOME is unset");
+    std::path::PathBuf::from(home)
+        .join("Library/Application Support/Rewind")
+        .join("ui.sock")
+}
+
+/// The overlay stays resident so the hotkey only has to show a window that
+/// already exists. A resident process costs nothing while hidden if no frames
+/// are decoded, which is why the frame is dropped on hide.
+pub fn run(show: bool) {
+    Application::new().run(move |cx| {
         let display = cx.primary_display();
         let bounds = display
             .as_ref()
@@ -1134,6 +1182,17 @@ pub fn run() {
             .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(900.0))));
         let display_id = display.as_ref().map(|display| display.id());
         let display_size = bounds.size;
+
+        let path = ui_socket_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let Some(listener) = bind_listener(&path) else {
+            // Another overlay is already listening; it will be the one shown.
+            cx.quit();
+            return;
+        };
+        let listener = std::sync::Arc::new(listener);
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -1143,7 +1202,7 @@ pub fn run() {
                 traffic_light_position: None,
             }),
             focus: true,
-            show: true,
+            show: false,
             kind: WindowKind::PopUp,
             is_movable: false,
             is_resizable: false,
@@ -1156,18 +1215,33 @@ pub fn run() {
             tabbing_identifier: None,
         };
 
-        cx.open_window(options, |window, cx| {
-            let view = cx.new(Rewind::new);
-            window.focus(&view.read(cx).focus);
-            view
-        })
-        .expect("could not open the rewind window");
+        let handle = cx
+            .open_window(options, |_window, cx| cx.new(Rewind::new))
+            .expect("could not open the rewind window");
 
         crate::activate::make_borderless(
             f32::from(display_size.width),
             f32::from(display_size.height),
         );
+        crate::activate::make_accessory();
 
-        cx.activate(true);
+        if show {
+            handle
+                .update(cx, |view, window, cx| view.show(window, cx))
+                .ok();
+        }
+
+        cx.spawn(async move |cx| loop {
+            let listener = listener.clone();
+            let incoming = cx
+                .background_executor()
+                .spawn(async move { listener.accept().is_ok() })
+                .await;
+            if !incoming {
+                break;
+            }
+            let _ = handle.update(cx, |view, window, cx| view.show(window, cx));
+        })
+        .detach();
     });
 }

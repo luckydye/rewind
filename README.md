@@ -169,6 +169,13 @@ inside the overlay as status pills and a side panel, which was decoration.
 | ⌘C / Copy | copy the range to the clipboard as a video file |
 | Escape | copy the frame under the playhead to the clipboard, then close |
 
+The overlay is preloaded hidden when the daemon starts and stays resident, so
+the hotkey only shows a window that already exists (~70 ms instead of ~220 ms
+for a cold process launch, plus Metal setup). While hidden it decodes nothing
+and cost 0.00 s of CPU over 10 s; its frame is dropped on hide. The daemon
+signals it with one byte on `~/Library/Application Support/Rewind/ui.sock`, and
+only spawns a process if nothing answers there.
+
 Export writes to `~/Movies/Rewind/`; the bar then offers a Reveal button rather
 than opening Finder unprompted, because stealing focus would break Escape.
 

@@ -50,9 +50,28 @@ fn only_window() -> *mut c_void {
     }
 }
 
+/// The overlay stays resident between uses, so it must not sit in the Dock
+/// or the app switcher: NSApplicationActivationPolicyAccessory.
+pub fn make_accessory() {
+    unsafe {
+        let set: SendUnsigned = std::mem::transmute(objc_msgSend as *const ());
+        set(shared_application(), selector(c"setActivationPolicy:"), 1);
+    }
+}
+
+/// Hides the overlay and hands focus back to whichever app was frontmost
+/// before it opened. Ordering the window out alone would leave no app active.
+pub fn hide() {
+    unsafe {
+        let hide: SendPointer = std::mem::transmute(objc_msgSend as *const ());
+        hide(shared_application(), selector(c"hide:"), std::ptr::null_mut());
+    }
+}
+
 pub fn activate() {
     unsafe {
         let send: SendObject = std::mem::transmute(objc_msgSend as *const ());
+        send(shared_application(), selector(c"unhideWithoutActivation"));
         send(shared_application(), selector(c"activate"));
 
         // Ordering the window front after activating closes the race where

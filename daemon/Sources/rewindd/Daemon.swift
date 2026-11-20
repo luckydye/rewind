@@ -53,6 +53,9 @@ enum Daemon {
             FileHandle.standardError.write(Data("rewindd: running without a hotkey\n".utf8))
         }
 
+        // Preload the overlay hidden so the first hotkey is as fast as the rest.
+        launcher.preload()
+
         FileHandle.standardError.write(Data("rewindd: listening on \(path)\n".utf8))
         Task { await recorder.start() }
         app.run()
