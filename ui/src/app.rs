@@ -88,6 +88,16 @@ const GROUP: u32 = 0xFFFFFF0A;
 const DANGER: u32 = 0xFF5A4DFF;
 const PENDING: u32 = 0xF0A030FF;
 
+/// Which range frame the stage shows while dragging.
+#[derive(Clone, Copy, PartialEq)]
+enum EdgeMode {
+    /// The whole range is moving, so both ends matter.
+    Both,
+    /// Only one edge is moving: show just that end.
+    First,
+    Last,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Drag {
     Playhead,
@@ -567,7 +577,6 @@ impl Rewind {
                         if self.thumbnails.is_empty() {
                             self.fetch_thumbnails(cx);
                         }
-                        self.request_edge_frames(cx);
                     }
                     Err(message) => self.status = Some(Status::Error(message)),
                 }
@@ -975,14 +984,16 @@ impl Render for Rewind {
         let to_x = x_for(self.sel_to);
         let playhead_x = x_for(self.playhead);
 
-        // While the range is being dragged, show what it contains: its first and
-        // last frame, side by side.
-        let dragging_range = matches!(
-            self.drag,
-            Some(Drag::Range { .. }) | Some(Drag::From) | Some(Drag::To)
-        );
-        let stage = if dragging_range && self.edge_frames.is_some() {
-            self.edge_pair(stage_left, stage_top, stage_width, stage_height)
+        // While the range is being dragged, show what it covers: both ends when
+        // the whole range moves, just the end being dragged when one edge does.
+        let edge_mode = match self.drag {
+            Some(Drag::Range { .. }) => Some(EdgeMode::Both),
+            Some(Drag::From) => Some(EdgeMode::First),
+            Some(Drag::To) => Some(EdgeMode::Last),
+            _ => None,
+        };
+        let stage = if let (Some(mode), Some(frames)) = (edge_mode, self.edge_frames.as_ref()) {
+            self.edge_view(mode, frames, stage_left, stage_top, stage_width, stage_height)
         } else {
             match &self.frame {
             Some(image) => div()
@@ -1255,14 +1266,25 @@ impl Rewind {
             .into_any_element()
     }
 
-    /// The range's first and last frame, side by side, each fitted to half the
-    /// stage.
-    fn edge_pair(&self, left: f32, top: f32, width: f32, height: f32) -> AnyElement {
-        let Some((first, last)) = &self.edge_frames else {
-            return div().into_any_element();
+    /// The range's end frame(s) in the stage: both side by side while the whole
+    /// range moves, one filling the stage while a single edge moves.
+    fn edge_view(
+        &self,
+        mode: EdgeMode,
+        frames: &(Arc<RenderImage>, Arc<RenderImage>),
+        left: f32,
+        top: f32,
+        width: f32,
+        height: f32,
+    ) -> AnyElement {
+        let slots: &[(usize, &Arc<RenderImage>)] = match mode {
+            EdgeMode::Both => &[(0, &frames.0), (1, &frames.1)],
+            EdgeMode::First => &[(0, &frames.0)],
+            EdgeMode::Last => &[(0, &frames.1)],
         };
 
-        let half = (width - GAP) / 2.0;
+        let count = slots.len() as f32;
+        let slot_width = (width - GAP * (count - 1.0)) / count;
         let mut row = div()
             .absolute()
             .left(px(left))
@@ -1270,14 +1292,14 @@ impl Rewind {
             .w(px(width))
             .h(px(height));
 
-        for (slot, image) in [first.clone(), last.clone()].into_iter().enumerate() {
+        for (slot, (_, image)) in slots.iter().enumerate() {
             let (image_width, image_height) = fit(
                 self.frame_size.0 as f32,
                 self.frame_size.1 as f32,
-                half,
+                slot_width,
                 height,
             );
-            let x = slot as f32 * (half + GAP) + (half - image_width) / 2.0;
+            let x = slot as f32 * (slot_width + GAP) + (slot_width - image_width) / 2.0;
             let y = (height - image_height) / 2.0;
 
             row = row.child(
@@ -1292,7 +1314,7 @@ impl Rewind {
                     .border_1()
                     .border_color(rgba(BORDER))
                     .child(
-                        img(ImageSource::Render(image.clone()))
+                        img(ImageSource::Render(Arc::clone(image)))
                             .w(px(image_width))
                             .h(px(image_height)),
                     ),
