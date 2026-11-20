@@ -1,9 +1,13 @@
-//! The rewind overlay: a dimmed full-screen surface with the frame under the
-//! playhead, a timeline you can drag a range out of, and a floating toolbar.
+//! The rewind overlay.
 //!
-//! Deliberately laid out from the viewport size rather than with nested flex
-//! containers, because the timeline has to turn a window-space mouse position
-//! into a timestamp and that only stays correct if the geometry is explicit.
+//! Visual language: floating rounded panels over a dimmed desktop, a vertical
+//! action rail on the left, a status pill top-left, a context pill top-centre,
+//! a clip panel on the right, and one wide transport bar at the bottom holding
+//! the timeline.
+//!
+//! Laid out from the viewport size rather than with nested flex containers,
+//! because the timeline has to turn a window-space mouse position into a
+//! timestamp and that only stays correct if the geometry is explicit.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,9 +18,18 @@ use gpui::*;
 use crate::ipc::{self, Client, RawImage, Reply};
 use crate::protocol::{ClipRange, Command, Request};
 
-const SIDE: f32 = 56.0;
-const TIMELINE_HEIGHT: f32 = 44.0;
-const BOTTOM: f32 = 150.0;
+// MARK: - Geometry
+
+const MARGIN: f32 = 24.0;
+const RAIL_WIDTH: f32 = 56.0;
+const PANEL_WIDTH: f32 = 268.0;
+const BAR_HEIGHT: f32 = 132.0;
+const BAR_PADDING: f32 = 18.0;
+const GAP: f32 = 16.0;
+const TOP_PILL_HEIGHT: f32 = 44.0;
+
+const TRACK_Y: f32 = 86.0;
+const TRACK_H: f32 = 8.0;
 const HANDLE_REACH: f32 = 12.0;
 
 /// Capture is native-resolution (33 MB per frame on a 4K display). A 2K preview
@@ -24,14 +37,17 @@ const HANDLE_REACH: f32 = 12.0;
 /// exported clip is full resolution either way.
 const PREVIEW_WIDTH: i64 = 2048;
 
-const SCRIM: u32 = 0x0B0B0DCC;
-const PANEL: u32 = 0x1C1C1FF2;
-const PANEL_BORDER: u32 = 0xFFFFFF1F;
-const TRACK: u32 = 0xFFFFFF26;
-const ACCENT: u32 = 0x0A84FFFF;
-const TEXT: u32 = 0xFFFFFFEB;
-const TEXT_DIM: u32 = 0xFFFFFF99;
-const DANGER: u32 = 0xFF453AFF;
+// MARK: - Palette
+
+const SCRIM: u32 = 0x08080ACC;
+const PANEL: u32 = 0x1B1B1EF5;
+const SUNKEN: u32 = 0x121214FF;
+const BORDER: u32 = 0xFFFFFF12;
+const TEXT: u32 = 0xE9E9EDFF;
+const MUTED: u32 = 0x8A8A93FF;
+const ACCENT: u32 = 0x2F7CF6FF;
+const ACCENT_SOFT: u32 = 0x2F7CF64D;
+const TRACK: u32 = 0xFFFFFF1A;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Drag {
@@ -43,6 +59,12 @@ enum Drag {
 enum Status {
     Info(String),
     Error(String),
+}
+
+struct ClipEntry {
+    label: String,
+    path: String,
+    size: String,
 }
 
 pub struct Rewind {
@@ -62,6 +84,8 @@ pub struct Rewind {
     status: Option<Status>,
     ticker: Option<Task<()>>,
     activated: bool,
+    source: String,
+    clips: Vec<ClipEntry>,
 }
 
 impl Rewind {
@@ -78,6 +102,13 @@ impl Rewind {
             .as_ref()
             .err()
             .map(|error| Status::Error(error.to_string()));
+        let source = match state.and_then(|state| state.config.application_bundle_id.clone()) {
+            Some(bundle) => bundle,
+            None => state
+                .and_then(|state| state.display.as_ref())
+                .map(|display| display.name())
+                .unwrap_or_else(|| "No display".into()),
+        };
 
         let mut view = Self {
             focus: cx.focus_handle(),
@@ -96,6 +127,8 @@ impl Rewind {
             status,
             ticker: None,
             activated: false,
+            source,
+            clips: recent_clips(),
         };
 
         view.request_frame(cx);
@@ -118,6 +151,10 @@ impl Rewind {
         (self.sel_from - self.sel_to).max(0.0)
     }
 
+    fn position_in_selection(&self) -> f64 {
+        (self.sel_from - self.playhead).clamp(0.0, self.selection_duration())
+    }
+
     fn set_playhead(&mut self, seconds: f64, cx: &mut Context<Self>) {
         self.playhead = seconds.clamp(0.0, self.span);
         self.request_frame(cx);
@@ -129,6 +166,18 @@ impl Rewind {
         self.ticker = None;
         let next = self.playhead + delta;
         self.set_playhead(next, cx);
+    }
+
+    fn jump_to_start(&mut self, cx: &mut Context<Self>) {
+        self.playing = false;
+        self.ticker = None;
+        self.set_playhead(self.sel_from, cx);
+    }
+
+    fn jump_to_end(&mut self, cx: &mut Context<Self>) {
+        self.playing = false;
+        self.ticker = None;
+        self.set_playhead(self.sel_to, cx);
     }
 
     // MARK: - Playback
@@ -219,7 +268,11 @@ impl Rewind {
                     Err(message) => self.status = Some(Status::Error(message)),
                 }
             }
-            Ok(_) => self.status = Some(Status::Error("expected a frame".into())),
+            Ok(Reply::Json(response)) => {
+                self.status = Some(Status::Error(
+                    response.error.unwrap_or_else(|| "the daemon sent no frame".into()),
+                ));
+            }
             Err(error) => self.status = Some(Status::Error(error.to_string())),
         }
 
@@ -272,6 +325,7 @@ impl Rewind {
                     Ok(response) => match response.clip {
                         Some(clip) => {
                             reveal(&clip.path);
+                            view.clips = recent_clips();
                             Status::Info(format!(
                                 "Saved {:.1}s · {:.1} MB",
                                 clip.duration,
@@ -304,13 +358,7 @@ impl Rewind {
         }
     }
 
-    fn timeline_down(
-        &mut self,
-        x: f32,
-        left: f32,
-        width: f32,
-        cx: &mut Context<Self>,
-    ) {
+    fn timeline_down(&mut self, x: f32, left: f32, width: f32, cx: &mut Context<Self>) {
         self.playing = false;
         self.ticker = None;
 
@@ -370,11 +418,18 @@ impl Render for Rewind {
         let width: f32 = viewport.width.into();
         let height: f32 = viewport.height.into();
 
-        let left = SIDE;
-        let track_width = (width - SIDE * 2.0).max(1.0);
+        let bar_top = height - MARGIN - BAR_HEIGHT;
+        let bar_width = width - MARGIN * 2.0;
+        let track_left = MARGIN + BAR_PADDING;
+        let track_width = (bar_width - BAR_PADDING * 2.0).max(1.0);
 
-        let stage_width = (width - SIDE * 2.0).max(1.0);
-        let stage_height = (height - BOTTOM - SIDE).max(1.0);
+        let stage_left = MARGIN + RAIL_WIDTH + GAP;
+        let stage_top = MARGIN + TOP_PILL_HEIGHT + GAP;
+        let stage_right = width - MARGIN - PANEL_WIDTH - GAP;
+        let stage_bottom = bar_top - GAP;
+        let stage_width = (stage_right - stage_left).max(1.0);
+        let stage_height = (stage_bottom - stage_top).max(1.0);
+
         let (frame_width, frame_height) = self.frame_size;
         let (image_width, image_height) = fit(
             frame_width as f32,
@@ -382,11 +437,12 @@ impl Render for Rewind {
             stage_width,
             stage_height,
         );
+        let image_left = stage_left + (stage_width - image_width) / 2.0;
+        let image_top = stage_top + (stage_height - image_height) / 2.0;
 
         let span = self.span;
-        let x_for = |seconds: f64| {
-            left + track_width * (1.0 - (seconds / span).clamp(0.0, 1.0)) as f32
-        };
+        let x_for =
+            |seconds: f64| track_left + track_width * (1.0 - (seconds / span).clamp(0.0, 1.0)) as f32;
 
         let from_x = x_for(self.sel_from);
         let to_x = x_for(self.sel_to);
@@ -394,12 +450,15 @@ impl Render for Rewind {
 
         let stage = match &self.frame {
             Some(image) => div()
+                .absolute()
+                .left(px(image_left))
+                .top(px(image_top))
                 .w(px(image_width))
                 .h(px(image_height))
-                .rounded(px(10.0))
+                .rounded(px(14.0))
                 .overflow_hidden()
                 .border_1()
-                .border_color(rgba(PANEL_BORDER))
+                .border_color(rgba(BORDER))
                 .child(
                     img(ImageSource::Render(image.clone()))
                         .w(px(image_width))
@@ -408,257 +467,587 @@ impl Render for Rewind {
                 .into_any_element(),
 
             None => div()
+                .absolute()
+                .left(px(image_left))
+                .top(px(image_top))
                 .w(px(image_width))
                 .h(px(image_height))
-                .rounded(px(10.0))
-                .bg(rgba(PANEL))
+                .rounded(px(14.0))
+                .bg(rgba(SUNKEN))
                 .border_1()
-                .border_color(rgba(PANEL_BORDER))
+                .border_color(rgba(BORDER))
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_sm()
-                .text_color(rgba(TEXT_DIM))
+                .text_color(rgba(MUTED))
                 .child("No frame")
                 .into_any_element(),
         };
 
-        let timeline = div()
+        let root = div()
             .relative()
-            .w_full()
-            .h(px(TIMELINE_HEIGHT))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
-                    view.timeline_down(event.position.x.into(), left, track_width, cx)
-                }),
-            )
-            .on_mouse_move(
-                cx.listener(move |view, event: &MouseMoveEvent, _window, cx| {
-                    view.timeline_drag(event.position.x.into(), left, track_width, cx)
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|view, _event: &MouseUpEvent, _window, cx| {
-                    view.drag = None;
-                    cx.notify();
-                }),
-            )
-            // Track
-            .child(
-                div()
-                    .absolute()
-                    .left(px(left))
-                    .top(px(TIMELINE_HEIGHT / 2.0 - 3.0))
-                    .w(px(track_width))
-                    .h(px(6.0))
-                    .rounded_full()
-                    .bg(rgba(TRACK)),
-            )
-            // Selection
-            .child(
-                div()
-                    .absolute()
-                    .left(px(from_x))
-                    .top(px(TIMELINE_HEIGHT / 2.0 - 3.0))
-                    .w(px((to_x - from_x).max(1.0)))
-                    .h(px(6.0))
-                    .rounded_full()
-                    .bg(rgba(ACCENT)),
-            )
-            // Range handles
-            .child(handle(from_x))
-            .child(handle(to_x))
-            // Playhead
-            .child(
-                div()
-                    .absolute()
-                    .left(px(playhead_x - 1.0))
-                    .top(px(TIMELINE_HEIGHT / 2.0 - 11.0))
-                    .w(px(2.0))
-                    .h(px(22.0))
-                    .rounded_full()
-                    .bg(rgba(TEXT)),
-            );
-
-        let toolbar = div()
-            .absolute()
-            .bottom(px(32.0))
-            .left_0()
-            .right_0()
-            .flex()
-            .justify_center()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .px(px(10.0))
-                    .py(px(9.0))
-                    .rounded(px(14.0))
-                    .bg(rgba(PANEL))
-                    .border_1()
-                    .border_color(rgba(PANEL_BORDER))
-                    .shadow_lg()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .w(px(34.0))
-                            .h(px(30.0))
-                            .rounded(px(9.0))
-                            .text_sm()
-                            .text_color(rgba(TEXT))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgba(0xFFFFFF14)))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|view, _event: &MouseDownEvent, _window, cx| {
-                                    view.toggle_play(cx)
-                                }),
-                            )
-                            .child(if self.playing { "❚❚" } else { "▶" }),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgba(TEXT_DIM))
-                            .child(format!(
-                                "{:.1}s / {:.1}s",
-                                self.sel_from - self.playhead,
-                                self.selection_duration()
-                            )),
-                    )
-                    .child(separator())
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgba(TEXT))
-                            .child(format!("{:.1}s", self.selection_duration())),
-                    )
-                    .child(button("Export", true).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, _event: &MouseDownEvent, _window, cx| view.export(cx)),
-                    ))
-                    .child(button("Close", false).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_view, _event: &MouseDownEvent, _window, cx| cx.quit()),
-                    )),
-            );
-
-        let mut root = div()
-            .relative()
-            .flex()
-            .flex_col()
             .size_full()
             .bg(rgba(SCRIM))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .child(stage)
+            .child(self.status_pill())
+            .child(self.context_pill(width))
+            .child(self.action_rail(cx))
+            .child(self.clip_panel(width))
+            .child(self.transport_bar(
+                bar_top,
+                bar_width,
+                track_left,
+                track_width,
+                from_x,
+                to_x,
+                playhead_x,
+                cx,
+            ));
+
+        root
+    }
+}
+
+// MARK: - Panels
+
+impl Rewind {
+    fn status_pill(&self) -> AnyElement {
+        panel()
+            .absolute()
+            .left(px(MARGIN))
+            .top(px(MARGIN))
+            .h(px(TOP_PILL_HEIGHT))
+            .px(px(18.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
             .child(
                 div()
-                    .flex_1()
-                    .w_full()
+                    .w(px(7.0))
+                    .h(px(7.0))
+                    .rounded_full()
+                    .bg(rgba(if self.exporting { 0xF0A030FF } else { ACCENT })),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgba(TEXT))
+                    .child("Rewind"),
+            )
+            .child(div().w(px(1.0)).h(px(14.0)).bg(rgba(BORDER)))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgba(MUTED))
+                    .child(self.source.clone()),
+            )
+            .into_any_element()
+    }
+
+    fn context_pill(&self, width: f32) -> AnyElement {
+        let label = format!(
+            "{:.1}s / {:.1}s",
+            self.position_in_selection(),
+            self.selection_duration()
+        );
+
+        panel()
+            .absolute()
+            .left(px(width / 2.0 - 90.0))
+            .top(px(MARGIN))
+            .h(px(TOP_PILL_HEIGHT))
+            .w(px(180.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(10.0))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgba(MUTED))
+                    .child("Range"),
+            )
+            .child(div().w(px(1.0)).h(px(14.0)).bg(rgba(BORDER)))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgba(TEXT))
+                    .child(label),
+            )
+            .into_any_element()
+    }
+
+    fn action_rail(&self, cx: &mut Context<Self>) -> AnyElement {
+        let top = MARGIN + TOP_PILL_HEIGHT + GAP;
+
+        div()
+            .absolute()
+            .left(px(MARGIN))
+            .top(px(top))
+            .w(px(RAIL_WIDTH))
+            .flex()
+            .flex_col()
+            .gap(px(GAP))
+            .child(
+                panel()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(6.0))
+                    .py(px(8.0))
+                    .child(
+                        rail_button(if self.exporting { "···" } else { "↓" }, true)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                                    view.export(cx)
+                                }),
+                            ),
+                    ),
+            )
+            .child(
+                panel()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(6.0))
+                    .py(px(8.0))
+                    .child(rail_button("↗", false).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _: &MouseDownEvent, _window, _cx| {
+                            if let Some(clip) = view.clips.first() {
+                                reveal(&clip.path);
+                            }
+                        }),
+                    ))
+                    .child(rail_button("✕", false).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_view, _: &MouseDownEvent, _window, cx| cx.quit()),
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn clip_panel(&self, width: f32) -> AnyElement {
+        let top = MARGIN + TOP_PILL_HEIGHT + GAP;
+
+        let mut list = div().flex().flex_col().gap(px(2.0));
+        if self.clips.is_empty() {
+            list = list.child(
+                div()
+                    .px(px(12.0))
+                    .py(px(10.0))
+                    .text_xs()
+                    .text_color(rgba(MUTED))
+                    .child("Nothing exported yet"),
+            );
+        }
+        for clip in &self.clips {
+            let path = clip.path.clone();
+            list = list.child(
+                div()
                     .flex()
                     .items_center()
-                    .justify_center()
-                    .child(stage),
-            )
-            .child(div().w_full().px(px(SIDE)).child(timeline));
-
-        if let Some(status) = &self.status {
-            let (text, color) = match status {
-                Status::Info(text) => (text.clone(), rgba(TEXT_DIM)),
-                Status::Error(text) => (text.clone(), rgba(DANGER)),
-            };
-            root = root.child(
-                div()
-                    .absolute()
-                    .bottom(px(96.0))
-                    .left_0()
-                    .right_0()
-                    .flex()
-                    .justify_center()
-                    .text_xs()
-                    .text_color(color)
-                    .child(text),
+                    .justify_between()
+                    .px(px(12.0))
+                    .py(px(9.0))
+                    .rounded(px(10.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgba(0xFFFFFF0F)))
+                    .on_mouse_down(MouseButton::Left, move |_, _, _| reveal(&path))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.0))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgba(TEXT))
+                                    .child(clip.label.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgba(MUTED))
+                                    .child(clip.size.clone()),
+                            ),
+                    ),
             );
         }
 
-        root.child(toolbar)
+        div()
+            .absolute()
+            .left(px(width - MARGIN - PANEL_WIDTH))
+            .top(px(top))
+            .w(px(PANEL_WIDTH))
+            .child(
+                panel()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .p(px(12.0))
+                    .child(
+                        div()
+                            .px(px(4.0))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgba(MUTED))
+                                    .child("CLIPS"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgba(MUTED))
+                                    .child("~/Movies/Rewind"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .rounded(px(14.0))
+                            .bg(rgba(SUNKEN))
+                            .p(px(4.0))
+                            .child(list),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn transport_bar(
+        &self,
+        bar_top: f32,
+        bar_width: f32,
+        track_left: f32,
+        track_width: f32,
+        from_x: f32,
+        to_x: f32,
+        playhead_x: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let step = ruler_step(self.span);
+        let mut ruler = div().absolute().left(px(track_left)).top(px(58.0)).h(px(18.0)).w(px(track_width));
+        let mut ticks = 0.0;
+        while ticks <= self.span + 0.001 {
+            let x = track_width * (1.0 - (ticks / self.span).clamp(0.0, 1.0)) as f32;
+            ruler = ruler.child(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .w(px(1.0))
+                            .h(px(3.0))
+                            .bg(rgba(0xFFFFFF26)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(MUTED))
+                            .child(format!("-{:.0}s", ticks)),
+                    ),
+            );
+            ticks += step;
+        }
+
+        panel()
+            .absolute()
+            .left(px(MARGIN))
+            .top(px(bar_top))
+            .w(px(bar_width))
+            .h(px(BAR_HEIGHT))
+            .child(
+                // Transport row
+                div()
+                    .absolute()
+                    .left(px(BAR_PADDING))
+                    .top(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        transport_button("◀◀").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                                view.jump_to_start(cx)
+                            }),
+                        ),
+                    )
+                    .child(
+                        transport_button(if self.playing { "❚❚" } else { "▶" })
+                            .bg(rgba(ACCENT_SOFT))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                                    view.toggle_play(cx)
+                                }),
+                            ),
+                    )
+                    .child(
+                        transport_button("▶▶").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                                view.jump_to_end(cx)
+                            }),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .ml(px(12.0))
+                            .text_sm()
+                            .text_color(rgba(TEXT))
+                            .child(format!(
+                                "{:.1}s / {:.1}s",
+                                self.position_in_selection(),
+                                self.selection_duration()
+                            )),
+                    ),
+            )
+            .child(
+                // Right-aligned actions
+                div()
+                    .absolute()
+                    .right(px(BAR_PADDING))
+                    .top(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        text_button("Reset").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                                view.sel_from = view.span;
+                                view.sel_to = 0.0;
+                                view.playhead = view.span;
+                                view.request_frame(cx);
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                    .child(
+                        text_button("Export")
+                            .bg(rgba(ACCENT))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                                    view.export(cx)
+                                }),
+                            ),
+                    ),
+            )
+            .child(ruler)
+            .child(
+                // Track
+                div()
+                    .absolute()
+                    .left(px(track_left))
+                    .top(px(TRACK_Y))
+                    .w(px(track_width))
+                    .h(px(TRACK_H))
+                    .rounded_full()
+                    .bg(rgba(TRACK)),
+            )
+            .child(
+                // Selection
+                div()
+                    .absolute()
+                    .left(px(from_x))
+                    .top(px(TRACK_Y))
+                    .w(px((to_x - from_x).max(1.0)))
+                    .h(px(TRACK_H))
+                    .rounded_full()
+                    .bg(rgba(ACCENT)),
+            )
+            .child(handle(from_x))
+            .child(handle(to_x))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(playhead_x - 1.0))
+                    .top(px(TRACK_Y - 6.0))
+                    .w(px(2.0))
+                    .h(px(TRACK_H + 12.0))
+                    .rounded_full()
+                    .bg(rgba(TEXT)),
+            )
+            .child(
+                // Drag surface, above the static visuals
+                div()
+                    .absolute()
+                    .left(px(track_left))
+                    .top(px(TRACK_Y - 14.0))
+                    .w(px(track_width))
+                    .h(px(TRACK_H + 28.0))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
+                            view.timeline_down(event.position.x.into(), track_left, track_width, cx)
+                        }),
+                    )
+                    .on_mouse_move(
+                        cx.listener(move |view, event: &MouseMoveEvent, _window, cx| {
+                            view.timeline_drag(event.position.x.into(), track_left, track_width, cx)
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|view, _: &MouseUpEvent, _window, cx| {
+                            view.drag = None;
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
 // MARK: - Bits
 
-fn handle(x: f32) -> AnyElement {
+fn panel() -> Div {
     div()
-        .absolute()
-        .left(px(x - 6.0))
-        .top(px(TIMELINE_HEIGHT / 2.0 - 6.0))
-        .w(px(12.0))
-        .h(px(12.0))
-        .rounded_full()
-        .bg(rgba(TEXT))
+        .rounded(px(18.0))
+        .bg(rgba(PANEL))
         .border_1()
-        .border_color(rgba(PANEL))
-        .into_any_element()
+        .border_color(rgba(BORDER))
+        .shadow_lg()
 }
 
-fn separator() -> AnyElement {
+fn rail_button(glyph: &'static str, primary: bool) -> Div {
+    let background = if primary { rgba(ACCENT_SOFT) } else { rgba(0x00000000) };
     div()
-        .w(px(1.0))
-        .h(px(18.0))
-        .bg(rgba(PANEL_BORDER))
-        .into_any_element()
+        .w(px(40.0))
+        .h(px(40.0))
+        .rounded(px(12.0))
+        .bg(background)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_sm()
+        .text_color(rgba(if primary { ACCENT } else { TEXT }))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(0xFFFFFF14)))
+        .child(glyph)
 }
 
-fn button(label: &'static str, primary: bool) -> Div {
-    let background = if primary { rgba(ACCENT) } else { rgba(0xFFFFFF14) };
-    let hovered = if primary {
-        rgba(0x0A84FFE6)
-    } else {
-        rgba(0xFFFFFF26)
-    };
+fn transport_button(glyph: &'static str) -> Div {
+    div()
+        .w(px(36.0))
+        .h(px(30.0))
+        .rounded(px(9.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_xs()
+        .text_color(rgba(TEXT))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(0xFFFFFF14)))
+        .child(glyph)
+}
 
+fn text_button(label: &'static str) -> Div {
     div()
         .px(px(14.0))
         .py(px(7.0))
         .rounded(px(9.0))
-        .bg(background)
+        .bg(rgba(0xFFFFFF12))
         .text_sm()
         .text_color(rgba(TEXT))
         .cursor_pointer()
-        .hover(move |style| style.bg(hovered))
+        .hover(|style| style.bg(rgba(0xFFFFFF20)))
         .child(label)
+}
+
+fn handle(x: f32) -> AnyElement {
+    div()
+        .absolute()
+        .left(px(x - 7.0))
+        .top(px(TRACK_Y - 3.0))
+        .w(px(14.0))
+        .h(px(14.0))
+        .rounded_full()
+        .bg(rgba(TEXT))
+        .border_2()
+        .border_color(rgba(PANEL))
+        .into_any_element()
+}
+
+fn ruler_step(span: f64) -> f64 {
+    for candidate in [1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0] {
+        if span / candidate <= 9.0 {
+            return candidate;
+        }
+    }
+    120.0
 }
 
 fn fit(frame_width: f32, frame_height: f32, max_width: f32, max_height: f32) -> (f32, f32) {
     if frame_width <= 0.0 || frame_height <= 0.0 {
         return (max_width, max_height);
     }
-    let scale = (max_width / frame_width).min(max_height / frame_height).min(1.0);
+    let scale = (max_width / frame_width)
+        .min(max_height / frame_height)
+        .min(1.0);
     (frame_width * scale, frame_height * scale)
 }
 
-fn format_seconds(seconds: f64) -> String {
-    format!("{:.1}s", seconds)
-}
-
 fn build_image(image: RawImage) -> Result<Arc<RenderImage>, String> {
-    let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-        image.width,
-        image.height,
-        image.pixels,
-    )
-    .ok_or_else(|| "frame size does not match its pixels".to_string())?;
+    let buffer =
+        image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(image.width, image.height, image.pixels)
+            .ok_or_else(|| "frame size does not match its pixels".to_string())?;
 
     Ok(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }
 
+fn recent_clips() -> Vec<ClipEntry> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let directory = std::path::Path::new(&home).join("Movies/Rewind");
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+
+    let mut clips: Vec<ClipEntry> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension()?.to_str()? != "mp4" {
+                return None;
+            }
+            let size = entry.metadata().ok()?.len();
+            let name = path.file_name()?.to_str()?.to_string();
+            let label = name
+                .strip_prefix("Rewind ")
+                .unwrap_or(&name)
+                .trim_end_matches(".mp4")
+                .to_string();
+            Some(ClipEntry {
+                label,
+                path: path.to_str()?.to_string(),
+                size: format!("{:.1} MB", size as f64 / 1_048_576.0),
+            })
+        })
+        .collect();
+
+    clips.sort_by(|a, b| b.label.cmp(&a.label));
+    clips.truncate(6);
+    clips
+}
+
 fn reveal(path: &str) {
-    let _ = std::process::Command::new("open").args(["-R", path]).spawn();
+    let _ = std::process::Command::new("open")
+        .args(["-R", path])
+        .spawn();
 }
 
 // MARK: - Entry
@@ -669,9 +1058,7 @@ pub fn run() {
         let bounds = display
             .as_ref()
             .map(|display| display.bounds())
-            .unwrap_or_else(|| {
-                Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(900.0)))
-            });
+            .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(900.0))));
         let display_id = display.as_ref().map(|display| display.id());
         let display_size = bounds.size;
 

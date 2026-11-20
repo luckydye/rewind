@@ -27,23 +27,27 @@ fn selector(name: &std::ffi::CStr) -> *mut c_void {
     unsafe { sel_registerName(name.as_ptr()) }
 }
 
-unsafe fn send() -> SendObject {
-    std::mem::transmute(objc_msgSend as *const ())
+fn send() -> SendObject {
+    unsafe { std::mem::transmute(objc_msgSend as *const ()) }
 }
 
-unsafe fn shared_application() -> *mut c_void {
-    let class = objc_getClass(c"NSApplication".as_ptr());
-    assert!(!class.is_null(), "NSApplication is not linked");
-    let app = send()(class, selector(c"sharedApplication"));
-    assert!(!app.is_null(), "NSApplication.sharedApplication was null");
-    app
+fn shared_application() -> *mut c_void {
+    unsafe {
+        let class = objc_getClass(c"NSApplication".as_ptr());
+        assert!(!class.is_null(), "NSApplication is not linked");
+        let app = send()(class, selector(c"sharedApplication"));
+        assert!(!app.is_null(), "NSApplication.sharedApplication was null");
+        app
+    }
 }
 
-unsafe fn only_window() -> *mut c_void {
-    let windows = send()(shared_application(), selector(c"windows"));
-    let window = send()(windows, selector(c"firstObject"));
-    assert!(!window.is_null(), "the overlay window does not exist yet");
-    window
+fn only_window() -> *mut c_void {
+    unsafe {
+        let windows = send()(shared_application(), selector(c"windows"));
+        let window = send()(windows, selector(c"firstObject"));
+        assert!(!window.is_null(), "the overlay window does not exist yet");
+        window
+    }
 }
 
 pub fn activate() {
