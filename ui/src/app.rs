@@ -22,7 +22,7 @@ use crate::protocol::{ClipRange, Command, Request};
 
 const MARGIN: f32 = 24.0;
 const GAP: f32 = 16.0;
-const BAR_HEIGHT: f32 = 144.0;
+const BAR_HEIGHT: f32 = 152.0;
 const BAR_PADDING: f32 = 16.0;
 
 /// Room for half a tick label beyond each end of the track, so "-0s" is not
@@ -30,16 +30,21 @@ const BAR_PADDING: f32 = 16.0;
 const RULER_INSET: f32 = 32.0;
 const LABEL_WIDTH: f32 = 44.0;
 
-/// Ruler band: tick numbers on their own strip, like a timeline header.
-const RULER_Y: f32 = 52.0;
-const RULER_H: f32 = 30.0;
+/// Toolbar row: grouped controls in recessed pills.
+const TOOLBAR_Y: f32 = 10.0;
+const TOOLBAR_H: f32 = 44.0;
 
-/// Content row: the recessed strip the selection block lives in.
-const ROW_Y: f32 = 92.0;
-const ROW_H: f32 = 38.0;
-const BLOCK_H: f32 = 22.0;
+/// Ruler: bare numbers on the panel, with the playhead badge riding on it.
+const RULER_Y: f32 = 62.0;
+const RULER_H: f32 = 26.0;
 
-const HANDLE_REACH: f32 = 13.0;
+/// Content row: the recessed strip the range block lives in.
+const ROW_Y: f32 = 94.0;
+const ROW_H: f32 = 44.0;
+const BLOCK_INSET: f32 = 5.0;
+
+const HANDLE_REACH: f32 = 10.0;
+const BADGE_WIDTH: f32 = 58.0;
 
 /// Capture is native-resolution (33 MB per frame on a 4K display). A 2K preview
 /// costs ~11 MB and about 40 ms round trip, which keeps scrubbing usable; the
@@ -55,6 +60,9 @@ const BORDER: u32 = 0xFFFFFF12;
 const TEXT: u32 = 0xE9E9EDFF;
 const MUTED: u32 = 0x8A8A93FF;
 const ACCENT: u32 = 0x2F7CF6FF;
+const ACCENT_FILL: u32 = 0x2F7CF659;
+const PLAYHEAD: u32 = 0xE5484DFF;
+const GROUP: u32 = 0xFFFFFF0A;
 const DANGER: u32 = 0xFF5A4DFF;
 const PENDING: u32 = 0xF0A030FF;
 
@@ -591,175 +599,157 @@ impl Rewind {
             Some(Status::Error(text)) => (text.clone(), rgba(DANGER)),
             None => (String::new(), rgba(MUTED)),
         };
-        let band_width = bar_width - BAR_PADDING * 2.0;
 
-        let mut bar = panel()
+        let transport = group()
+            .child(icon_button("◀◀").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.jump_to_start(cx)),
+            ))
+            .child(
+                icon_button(if self.playing { "❚❚" } else { "▶" })
+                    .text_sm()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _: &MouseDownEvent, _window, cx| view.toggle_play(cx)),
+                    ),
+            )
+            .child(icon_button("▶▶").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.jump_to_end(cx)),
+            ));
+
+        let mut left = div()
+            .absolute()
+            .left(px(BAR_PADDING))
+            .top(px(TOOLBAR_Y))
+            .h(px(TOOLBAR_H))
+            .flex()
+            .items_center()
+            .gap(px(16.0))
+            .child(transport)
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgba(MUTED))
+                    .child(format!("{:.1}s selected", self.selection_duration())),
+            );
+        if !status_text.is_empty() {
+            left = left.child(div().text_sm().text_color(status_colour).child(status_text));
+        }
+
+        let mut secondary = group();
+        if let Some(path) = &self.last_clip {
+            let path = path.clone();
+            secondary = secondary.child(
+                label_button("Reveal").on_mouse_down(MouseButton::Left, move |_, _, _| reveal(&path)),
+            );
+        }
+        secondary = secondary.child(label_button("Reset").on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, _: &MouseDownEvent, _window, cx| view.reset_range(cx)),
+        ));
+
+        let right = div()
+            .absolute()
+            .right(px(BAR_PADDING))
+            .top(px(TOOLBAR_Y))
+            .h(px(TOOLBAR_H))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .child(secondary)
+            .child(
+                group().bg(rgba(ACCENT)).child(
+                    label_button(if self.exporting { "Exporting…" } else { "Export" })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _: &MouseDownEvent, _window, cx| view.export(cx)),
+                        ),
+                ),
+            )
+            .child(icon_button("✕").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_view, _: &MouseDownEvent, _window, cx| cx.quit()),
+            ));
+
+        let block_top = ROW_Y + BLOCK_INSET;
+        let block_height = ROW_H - BLOCK_INSET * 2.0;
+
+        panel()
             .absolute()
             .left(px(MARGIN))
             .top(px(bar_top))
             .w(px(bar_width))
             .h(px(BAR_HEIGHT))
-            // Ruler strip and content row, both recessed.
-            .child(
-                div()
-                    .absolute()
-                    .left(px(BAR_PADDING))
-                    .top(px(RULER_Y))
-                    .w(px(band_width))
-                    .h(px(RULER_H))
-                    .rounded(px(10.0))
-                    .bg(rgba(SUNKEN)),
-            )
+            .child(left)
+            .child(right)
+            .child(self.ruler(track_left, track_width))
             .child(
                 div()
                     .absolute()
                     .left(px(BAR_PADDING))
                     .top(px(ROW_Y))
-                    .w(px(band_width))
+                    .w(px(bar_width - BAR_PADDING * 2.0))
                     .h(px(ROW_H))
-                    .rounded(px(10.0))
+                    .rounded(px(12.0))
                     .bg(rgba(SUNKEN)),
             )
-            // Transport
             .child(
-                div()
-                    .absolute()
-                    .left(px(BAR_PADDING))
-                    .top(px(10.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(transport_button("◀◀").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, _: &MouseDownEvent, _window, cx| view.jump_to_start(cx)),
-                    ))
-                    .child(
-                        transport_button(if self.playing { "❚❚" } else { "▶" })
-                            .bg(rgba(ACCENT))
-                            .text_color(rgba(0xFFFFFFFF))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|view, _: &MouseDownEvent, _window, cx| {
-                                    view.toggle_play(cx)
-                                }),
-                            ),
-                    )
-                    .child(transport_button("▶▶").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, _: &MouseDownEvent, _window, cx| view.jump_to_end(cx)),
-                    ))
-                    .child(
-                        div()
-                            .ml(px(12.0))
-                            .text_sm()
-                            .text_color(rgba(TEXT))
-                            .child(format!(
-                                "-{:.1}s · {:.1}s range",
-                                self.playhead,
-                                self.selection_duration()
-                            )),
-                    ),
-            );
-
-        if !status_text.is_empty() {
-            bar = bar.child(
-                div()
-                    .absolute()
-                    .left(px(BAR_PADDING + 300.0))
-                    .top(px(20.0))
-                    .text_xs()
-                    .text_color(status_colour)
-                    .child(status_text),
-            );
-        }
-
-        let mut actions = div()
-            .absolute()
-            .right(px(BAR_PADDING))
-            .top(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0));
-
-        if let Some(path) = &self.last_clip {
-            let path = path.clone();
-            actions = actions.child(text_button("Reveal").on_mouse_down(
-                MouseButton::Left,
-                move |_, _, _| reveal(&path),
-            ));
-        }
-
-        bar = bar
-            .child(
-                actions
-                    .child(text_button("Reset").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, _: &MouseDownEvent, _window, cx| view.reset_range(cx)),
-                    ))
-                    .child(
-                        text_button("Export")
-                            .bg(rgba(ACCENT))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|view, _: &MouseDownEvent, _window, cx| {
-                                    view.export(cx)
-                                }),
-                            ),
-                    )
-                    .child(
-                        transport_button("✕").on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|_view, _: &MouseDownEvent, _window, cx| cx.quit()),
-                        ),
-                    ),
-            )
-            .child(self.ruler(track_left, track_width))
-            // The selection block. Its body is the drag handle for the range.
-            .child(
+                // The range block. Grabbing its body moves the whole range.
                 div()
                     .absolute()
                     .left(px(from_x))
-                    .top(px(ROW_Y + (ROW_H - BLOCK_H) / 2.0))
-                    .w(px((to_x - from_x).max(1.0)))
-                    .h(px(BLOCK_H))
-                    .rounded(px(6.0))
-                    .bg(rgba(ACCENT)),
+                    .top(px(block_top))
+                    .w(px((to_x - from_x).max(2.0)))
+                    .h(px(block_height))
+                    .rounded(px(8.0))
+                    .bg(rgba(ACCENT_FILL))
+                    .border_1()
+                    .border_color(rgba(ACCENT)),
             )
-            .child(handle(from_x))
-            .child(handle(to_x))
+            .child(trim_handle(from_x + 5.0, block_top, block_height))
+            .child(trim_handle(to_x - 5.0, block_top, block_height))
             .child(
                 div()
                     .absolute()
                     .left(px(playhead_x - 1.0))
-                    .top(px(ROW_Y + 5.0))
+                    .top(px(RULER_Y + RULER_H / 2.0))
                     .w(px(2.0))
-                    .h(px(ROW_H - 10.0))
-                    .rounded_full()
-                    .bg(rgba(TEXT)),
+                    .h(px(ROW_Y + ROW_H - RULER_Y - RULER_H / 2.0))
+                    .bg(rgba(PLAYHEAD)),
             )
             .child(
-                // Everything below the transport row seeks: the ruler strip and
-                // the content row together.
+                div()
+                    .absolute()
+                    .left(px(playhead_x - BADGE_WIDTH / 2.0))
+                    .top(px(RULER_Y))
+                    .w(px(BADGE_WIDTH))
+                    .h(px(RULER_H))
+                    .rounded(px(8.0))
+                    .bg(rgba(PLAYHEAD))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(rgba(0xFFFFFFFF))
+                    .child(format!("−{:.1}s", self.playhead)),
+            )
+            .child(
+                // Ruler and row together are the seek / drag surface.
                 div()
                     .absolute()
                     .left(px(0.0))
-                    .top(px(RULER_Y - 4.0))
+                    .top(px(RULER_Y))
                     .w(px(bar_width))
-                    .h(px(BAR_HEIGHT - RULER_Y + 4.0))
+                    .h(px(BAR_HEIGHT - RULER_Y))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
-                            view.timeline_down(
-                                event.position.x.into(),
-                                track_origin,
-                                track_width,
-                                cx,
-                            )
+                            view.timeline_down(event.position.x.into(), track_origin, track_width, cx)
                         }),
                     ),
-            );
-
-        bar.into_any_element()
+            )
+            .into_any_element()
     }
 
     /// Numbers are centred on their tick in a fixed-width box, which keeps the
@@ -769,8 +759,8 @@ impl Rewind {
         let mut ruler = div()
             .absolute()
             .left(px(track_left))
-            .top(px(RULER_Y + 7.0))
-            .h(px(18.0))
+            .top(px(RULER_Y))
+            .h(px(RULER_H))
             .w(px(track_width));
 
         let mut ticks = 0.0;
@@ -782,15 +772,13 @@ impl Rewind {
                     .left(px(x - LABEL_WIDTH / 2.0))
                     .top(px(0.0))
                     .w(px(LABEL_WIDTH))
+                    .h(px(RULER_H))
                     .flex()
-                    .flex_col()
                     .items_center()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgba(MUTED))
-                            .child(format!("-{:.0}s", ticks)),
-                    ),
+                    .justify_center()
+                    .text_xs()
+                    .text_color(rgba(MUTED))
+                    .child(format!("−{:.0}s", ticks)),
             );
             ticks += step;
         }
@@ -810,52 +798,63 @@ fn panel() -> Div {
         .shadow_lg()
 }
 
-fn transport_button(glyph: &'static str) -> Div {
+/// A recessed pill that groups related controls, as in the reference.
+fn group() -> Div {
     div()
-        .w(px(34.0))
-        .h(px(34.0))
+        .h(px(TOOLBAR_H))
+        .px(px(4.0))
+        .rounded(px(14.0))
+        .bg(rgba(GROUP))
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+}
+
+fn icon_button(glyph: &'static str) -> Div {
+    div()
+        .w(px(36.0))
+        .h(px(36.0))
         .rounded(px(10.0))
-        .bg(rgba(0xFFFFFF0D))
         .flex()
         .items_center()
         .justify_center()
         .text_xs()
         .text_color(rgba(TEXT))
         .cursor_pointer()
-        .hover(|style| style.bg(rgba(0xFFFFFF1F)))
+        .hover(|style| style.bg(rgba(0xFFFFFF14)))
         .child(glyph)
 }
 
-fn text_button(label: &'static str) -> Div {
+fn label_button(label: &'static str) -> Div {
     div()
+        .h(px(36.0))
         .px(px(14.0))
-        .py(px(7.0))
-        .rounded(px(9.0))
-        .bg(rgba(0xFFFFFF12))
+        .rounded(px(10.0))
+        .flex()
+        .items_center()
         .text_sm()
         .text_color(rgba(TEXT))
         .cursor_pointer()
-        .hover(|style| style.bg(rgba(0xFFFFFF20)))
+        .hover(|style| style.bg(rgba(0xFFFFFF14)))
         .child(label)
 }
 
-fn handle(x: f32) -> AnyElement {
+fn trim_handle(x: f32, top: f32, height: f32) -> AnyElement {
+    let bar = height * 0.5;
     div()
         .absolute()
-        .left(px(x - 7.0))
-        .top(px(ROW_Y + (ROW_H - 14.0) / 2.0))
-        .w(px(14.0))
-        .h(px(14.0))
+        .left(px(x - 2.0))
+        .top(px(top + (height - bar) / 2.0))
+        .w(px(4.0))
+        .h(px(bar))
         .rounded_full()
         .bg(rgba(TEXT))
-        .border_2()
-        .border_color(rgba(PANEL))
         .into_any_element()
 }
 
 fn ruler_step(span: f64) -> f64 {
     for candidate in [1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0] {
-        if span / candidate <= 6.0 {
+        if span / candidate <= 14.0 {
             return candidate;
         }
     }
