@@ -31,7 +31,11 @@ public final class IPCServer {
     private let queue = DispatchQueue(label: "com.rewind.ipc.server")
     private var listenerFD: Int32 = -1
     private var acceptSource: DispatchSourceRead?
-    private var connections: [Int32: IPCServer.Connection] = [:]
+    /// Keyed by object identity, not by file descriptor: a closed connection's
+    /// descriptor number is reused by the next accept straight away, and its
+    /// deferred removal used to delete the *new* connection, whose request was
+    /// then never read and whose client waited forever for a reply.
+    private var connections: [ObjectIdentifier: IPCServer.Connection] = [:]
 
     public init(path: String, handler: @escaping Handler) {
         self.path = path
@@ -117,12 +121,12 @@ public final class IPCServer {
                 socklen_t(MemoryLayout<Int32>.size)
             )
 
-            let connection = Connection(fd: clientFD, handler: handler) { [weak self] closedFD in
+            let connection = Connection(fd: clientFD, handler: handler) { [weak self] closed in
                 self?.queue.async {
-                    self?.connections[closedFD] = nil
+                    self?.connections[closed] = nil
                 }
             }
-            connections[clientFD] = connection
+            connections[ObjectIdentifier(connection)] = connection
             connection.start()
         }
     }
@@ -132,13 +136,17 @@ extension IPCServer {
     fileprivate final class Connection {
         private let fd: Int32
         private let handler: Handler
-        private let onClose: @Sendable (Int32) -> Void
+        private let onClose: @Sendable (ObjectIdentifier) -> Void
         private let queue: DispatchQueue
         private let writeQueue: DispatchQueue
         private var source: DispatchSourceRead?
         private var decoder = FrameDecoder()
 
-        init(fd: Int32, handler: @escaping Handler, onClose: @escaping @Sendable (Int32) -> Void) {
+        init(
+            fd: Int32,
+            handler: @escaping Handler,
+            onClose: @escaping @Sendable (ObjectIdentifier) -> Void
+        ) {
             self.fd = fd
             self.handler = handler
             self.onClose = onClose
@@ -162,7 +170,7 @@ extension IPCServer {
         private func readAvailable() {
             guard let chunk = SocketIO.readUpTo(fd, 64 * 1024) else {
                 shutdown()
-                onClose(fd)
+                onClose(ObjectIdentifier(self))
                 return
             }
 
@@ -171,12 +179,18 @@ extension IPCServer {
                 frames = try decoder.append(chunk)
             } catch {
                 shutdown()
-                onClose(fd)
+                onClose(ObjectIdentifier(self))
                 return
             }
 
             for frame in frames {
-                guard let request = try? JSONDecoder().decode(Request.self, from: frame) else {
+                // An undecodable request still gets a reply: dropping it left the
+                // client blocked on a read until its timeout.
+                let request: Request
+                do {
+                    request = try JSONDecoder().decode(Request.self, from: frame)
+                } catch {
+                    write(.json(.failure("cannot decode request: \(error)")))
                     continue
                 }
                 Task { [handler] in
