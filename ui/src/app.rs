@@ -270,7 +270,17 @@ impl Rewind {
     }
 
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.refresh(cx);
+        // Show first, load second: `refresh` asks the daemon for the buffer
+        // state, and the daemon may still be finishing the last clipboard copy.
+        // Waiting for that before ordering the window cost up to a second.
+        self.frame = None;
+        self.drag = None;
+        self.release_images(cx);
+        self.progress = 0.0;
+        self.close_generation = self.close_generation.wrapping_add(1);
+        self.closing = false;
+        self.copy_failed = false;
+
         // Open on the display actually being captured, not always the primary.
         if let Some((x, y, width, height)) = self.screen {
             crate::activate::place(x, y, width, height);
@@ -281,6 +291,8 @@ impl Rewind {
         crate::activate::prepare_fade();
         crate::activate::activate();
         crate::activate::start_fade();
+
+        self.refresh(cx);
         // Activation races window ordering and is sometimes dropped; asserting
         // it once more shortly after makes the overlay reliably take the keys.
         cx.spawn(async move |_, cx| {
