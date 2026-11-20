@@ -135,7 +135,7 @@ pub fn start_fade() {
 
         send(context_class, selector(c"beginGrouping"));
         let context = send(context_class, selector(c"currentContext"));
-        set_double(context, selector(c"setDuration:"), 0.16);
+        set_double(context, selector(c"setDuration:"), 0.11);
 
         let proxy = send(window, selector(c"animator"));
         set_double(proxy, selector(c"setAlphaValue:"), 1.0);

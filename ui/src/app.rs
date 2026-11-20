@@ -58,7 +58,7 @@ const BADGE_WIDTH: f32 = 66.0;
 
 /// Entrance: the preview starts full-bleed and shrinks into place, then the bar
 /// slides up from below the screen edge. ~300 ms in total.
-const MORPH_MS: u64 = 260;
+const MORPH_MS: u64 = 190;
 const MORPH_STEPS: u64 = 18;
 
 /// Capture is native-resolution (33 MB per frame on a 4K display). A 2K preview
@@ -173,6 +173,9 @@ pub struct Rewind {
     last_clip: Option<String>,
     /// A close is in flight: the frame is being copied before the overlay hides.
     close_copy: CloseCopy,
+    /// Bumped whenever a close starts or the overlay is shown again, so a copy
+    /// that finishes late cannot hide an overlay the user has reopened.
+    close_generation: u64,
     closing: bool,
     /// The last copy failed; the next close hides without trying again, so a
     /// dead daemon cannot trap the user in the overlay.
@@ -210,6 +213,7 @@ impl Rewind {
             ticker: None,
             playback_clock: None,
             close_copy: CloseCopy::Image,
+            close_generation: 0,
             last_clip: None,
             closing: false,
             copy_failed: false,
@@ -290,6 +294,10 @@ impl Rewind {
         // Full bleed until the first frame arrives; `received` starts the morph
         // so it never animates a placeholder.
         self.progress = 0.0;
+        // A close may still be copying; make sure it cannot hide this show.
+        self.close_generation = self.close_generation.wrapping_add(1);
+        self.closing = false;
+        self.copy_failed = false;
     }
 
     /// First and last frame of the range. Coalesced like the main preview: one
@@ -666,6 +674,7 @@ impl Rewind {
     }
 
     fn render_clip_then(&mut self, copy: bool, close_after: bool, cx: &mut Context<Self>) {
+        let generation = self.close_generation;
         if self.exporting {
             return;
         }
@@ -706,7 +715,9 @@ impl Rewind {
                 if close_after {
                     match &result {
                         Ok(_) => {
-                            view.hide(cx);
+                            if view.close_generation == generation {
+                                view.hide(cx);
+                            }
                             return;
                         }
                         Err(error) => {
@@ -792,6 +803,8 @@ impl Rewind {
         }
 
         self.closing = true;
+        self.close_generation = self.close_generation.wrapping_add(1);
+        let generation = self.close_generation;
         self.stop_playback();
 
         if self.close_copy == CloseCopy::Clip {
@@ -822,7 +835,11 @@ impl Rewind {
                 .await;
 
             this.update(cx, |view, cx| match result {
-                Ok(_) => view.hide(cx),
+                Ok(_) => {
+                    if view.close_generation == generation {
+                        view.hide(cx);
+                    }
+                }
                 Err(error) => {
                     view.closing = false;
                     view.copy_failed = true;
