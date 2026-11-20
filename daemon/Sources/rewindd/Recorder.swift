@@ -1,3 +1,4 @@
+import CoreMedia
 import Foundation
 import RewindKit
 
@@ -24,6 +25,7 @@ actor Recorder {
     private var desiredRecording = false
     private var lastError: String?
     private var retryTask: Task<Void, Never>?
+    private let previews = PreviewEngine()
 
     init(config: RecorderConfig) {
         self.config = config
@@ -103,6 +105,37 @@ actor Recorder {
             width: encoder.width,
             height: encoder.height
         )
+    }
+
+    func preview(secondsAgo: Double, width: Int) async throws -> Data {
+        guard let ring else { throw RecorderError.notRecording }
+        let snapshot = try ring.snapshot(last: config.bufferSeconds)
+        let index = Self.frameIndex(secondsAgo: secondsAgo, frames: snapshot.frames)
+        return try previews.jpeg(frames: snapshot.frames, index: index, width: width)
+    }
+
+    func previewBatch(secondsAgo: Double, count: Int, width: Int) async throws -> [Data] {
+        guard let ring else { throw RecorderError.notRecording }
+        let snapshot = try ring.snapshot(last: config.bufferSeconds)
+        let start = Self.frameIndex(secondsAgo: secondsAgo, frames: snapshot.frames)
+        let end = min(start + max(count, 1) - 1, snapshot.frames.count - 1)
+
+        var frames: [Data] = []
+        for index in start...end {
+            frames.append(try previews.jpeg(frames: snapshot.frames, index: index, width: width))
+        }
+        return frames
+    }
+
+    static func frameIndex(secondsAgo: Double, frames: [CMSampleBuffer]) -> Int {
+        guard let last = frames.last else { return 0 }
+        let target = last.presentationTimeStamp.seconds - secondsAgo
+        var found = 0
+        for (index, frame) in frames.enumerated()
+        where frame.presentationTimeStamp.seconds <= target {
+            found = index
+        }
+        return found
     }
 
     func displays() async throws -> [DisplayInfo] {

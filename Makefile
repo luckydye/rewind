@@ -3,7 +3,7 @@ DEBUG := $(DAEMON)/.build/debug
 RELEASE := $(DAEMON)/.build/release
 BUNDLE := dist/Rewind.app
 
-.PHONY: build release bundle daemon run status list doctor measure clean
+.PHONY: build release bundle daemon run status list doctor ui measure clean
 
 build:
 	cd $(DAEMON) && swift build
@@ -34,8 +34,11 @@ list: build
 doctor: build
 	$(DEBUG)/rewindd doctor
 
+ui:
+	cd ui && cargo build
+
 measure: build
 	./scripts/measure.sh
 
 clean:
-	rm -rf $(DAEMON)/.build dist
+	rm -rf $(DAEMON)/.build ui/target dist

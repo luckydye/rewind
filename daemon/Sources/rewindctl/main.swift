@@ -20,6 +20,7 @@ private func usage() -> Never {
           rewindctl config [--buffer S] [--fps N] [--height PX] [--display N]
                            [--app BUNDLE_ID | --whole-screen] [--bitrate B]
           rewindctl displays | apps
+          rewindctl preview --ago 3 [--width 960] [--count 1] [--out PATH]
         """
     )
     exit(0)
@@ -149,6 +150,48 @@ do {
             fail(response.error ?? "unexpected response")
         }
         if wantsJSON { printJSON(state) } else { print(describe(state)) }
+
+    case "preview":
+        let ago = option("--ago", arguments).flatMap(Double.init) ?? 0
+        let width = option("--width", arguments).flatMap(Int.init) ?? 960
+        let count = option("--count", arguments).flatMap(Int.init) ?? 1
+        let out = option("--out", arguments)
+
+        let started = Date()
+        let response = try client.send(
+            Request(
+                command: count > 1 ? .previewBatch : .previewFrame,
+                seconds: ago,
+                width: width,
+                count: count
+            )
+        )
+        guard response.ok, let previews = response.previews, !previews.isEmpty else {
+            fail(response.error ?? "unexpected response")
+        }
+        let elapsed = Date().timeIntervalSince(started)
+
+        if let out {
+            let base = URL(fileURLWithPath: out)
+            for (index, data) in previews.enumerated() {
+                let url = previews.count == 1
+                    ? base
+                    : base.deletingPathExtension()
+                        .appendingPathExtension(String(format: "%03d", index))
+                        .appendingPathExtension("jpg")
+                try data.write(to: url)
+            }
+        }
+
+        let bytes = previews.reduce(0) { $0 + $1.count }
+        print(
+            String(
+                format: "%d frame(s), %.1f KB total, %.0f ms round trip",
+                previews.count,
+                Double(bytes) / 1024,
+                elapsed * 1000
+            )
+        )
 
     case "displays":
         let response = try client.send(Request(command: .listDisplays))

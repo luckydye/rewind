@@ -8,6 +8,8 @@ public enum Command: String, Codable, Sendable {
     case exportClip
     case listDisplays
     case listApplications
+    case previewFrame
+    case previewBatch
     case quit
 }
 
@@ -18,17 +20,23 @@ public struct Request: Codable, Sendable {
     public var config: RecorderConfig?
     public var seconds: Double?
     public var path: String?
+    public var width: Int?
+    public var count: Int?
 
     public init(
         command: Command,
         config: RecorderConfig? = nil,
         seconds: Double? = nil,
-        path: String? = nil
+        path: String? = nil,
+        width: Int? = nil,
+        count: Int? = nil
     ) {
         self.command = command
         self.config = config
         self.seconds = seconds
         self.path = path
+        self.width = width
+        self.count = count
     }
 }
 
@@ -116,6 +124,8 @@ public struct Response: Codable, Sendable {
     public var clip: Clip?
     public var displays: [DisplayInfo]?
     public var applications: [ApplicationInfo]?
+    /// JPEG frames, base64 encoded by JSONEncoder.
+    public var previews: [Data]?
 
     public init(
         ok: Bool,
@@ -123,7 +133,8 @@ public struct Response: Codable, Sendable {
         state: State? = nil,
         clip: Clip? = nil,
         displays: [DisplayInfo]? = nil,
-        applications: [ApplicationInfo]? = nil
+        applications: [ApplicationInfo]? = nil,
+        previews: [Data]? = nil
     ) {
         self.ok = ok
         self.error = error
@@ -131,6 +142,7 @@ public struct Response: Codable, Sendable {
         self.clip = clip
         self.displays = displays
         self.applications = applications
+        self.previews = previews
     }
 
     public static func failure(_ message: String) -> Response {

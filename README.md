@@ -135,7 +135,34 @@ mid-request cannot leave the daemon in a half-written state.
 ```
 
 Commands: `status`, `start`, `stop`, `setConfig`, `exportClip`,
-`listDisplays`, `listApplications`, `quit`.
+`listDisplays`, `listApplications`, `previewFrame`, `previewBatch`, `quit`.
+
+### Preview frames
+
+GPUI cannot decode HEVC, and shipping FFmpeg to the UI is not an option, so the
+daemon decodes and the UI receives pixels:
+
+```jsonc
+{ "command": "previewBatch", "seconds": 3.0, "count": 30, "width": 960 }
+// → "previews": [ "<base64 jpeg>", … ]
+```
+
+`seconds` is an offset *backwards from now*, so a timeline can ask for a
+position without knowing absolute timestamps. JPEG (base64 in the JSON) rather
+than raw BGRA keeps a frame at ~40 KB instead of 1.6 MB, and costs nothing at
+preview resolution.
+
+The decoder keeps its state between requests: scrubbing forward costs one
+decode per frame, and only a backward seek costs a re-decode from the keyframe.
+Measured with `testsrc2` (worst-case entropy) at 640 px wide:
+
+| | latency |
+|---|---|
+| scrub forward, 0.1 s steps | ~15 ms |
+| scrub backward, jumping GOPs | 27–50 ms |
+| 30-frame batch (1 s of video) | ~375 ms |
+
+That is a full round trip including socket, decode, scale and JPEG encode.
 
 ## Standalone capture
 
@@ -163,7 +190,9 @@ rewindd run --seconds 10 --stats 3 --clip 5 --export /tmp/clip.mp4
 
 - [x] capture → HEVC → keyframe-aligned ring → export
 - [x] daemon: unix-socket IPC, menu bar item, persisted config, login item
-- [ ] `rewind-ui`: GPUI timeline scrubber and clip library
+- [x] preview decode path: on-demand frames and batches over the socket
+- [ ] `rewind-ui`: GPUI overlay, timeline scrubber, live playback, drag-out
+- [ ] global hotkey in the daemon (GPUI cannot register one)
 - [ ] power policy: AC/battery, low power mode, thermal state, screen lock
 - [ ] audio: system audio tap, optional microphone
 - [ ] thumbnails for the timeline (daemon renders, UI displays)

@@ -30,6 +30,21 @@ enum Router {
             case .listDisplays:
                 return Response(ok: true, displays: try await recorder.displays())
 
+            case .previewFrame:
+                let data = try await recorder.preview(
+                    secondsAgo: request.seconds ?? 0,
+                    width: request.width ?? 960
+                )
+                return Response(ok: true, previews: [data])
+
+            case .previewBatch:
+                let frames = try await recorder.previewBatch(
+                    secondsAgo: request.seconds ?? 0,
+                    count: request.count ?? 30,
+                    width: request.width ?? 960
+                )
+                return Response(ok: true, previews: frames)
+
             case .listApplications:
                 return Response(ok: true, applications: try await recorder.applications())
 
