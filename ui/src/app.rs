@@ -67,7 +67,7 @@ const MORPH_STEPS: u64 = 18;
 const PREVIEW_WIDTH: i64 = 2048;
 
 /// The timeline strip: one thumbnail per slot, decoded from keyframes.
-const THUMBNAIL_COUNT: i64 = 24;
+const THUMBNAIL_COUNT: i64 = 16;
 const THUMBNAIL_WIDTH: i64 = 160;
 
 
@@ -249,8 +249,9 @@ impl Rewind {
         })
         .detach();
 
+        // Full bleed until the first frame arrives; `received` starts the morph
+        // so it never animates a placeholder.
         self.progress = 0.0;
-        self.animate_in(cx);
     }
 
     /// The strip is fetched once per show, in one request, from keyframes.
@@ -489,6 +490,17 @@ impl Rewind {
                         if matches!(self.status, Some(Status::Error(_))) {
                             self.status = None;
                         }
+                        // The entrance animates real content, so it starts when
+                        // the first frame lands rather than on the placeholder.
+                        if self.progress == 0.0 {
+                            self.animate_in(cx);
+                        }
+                        // The strip is a full second of decoding on the daemon's
+                        // actor; asking for it later keeps it from delaying the
+                        // first frame.
+                        if self.thumbnails.is_empty() {
+                            self.fetch_thumbnails(cx);
+                        }
                     }
                     Err(message) => self.status = Some(Status::Error(message)),
                 }
@@ -503,7 +515,11 @@ impl Rewind {
                         .unwrap_or_else(|| "the daemon sent no frame".into()),
                 ));
             }
-            Err(error) => self.status = Some(Status::Error(error.to_string())),
+            Err(error) => {
+                // Nothing to animate into; settle into the resting layout.
+                self.progress = 1.0;
+                self.status = Some(Status::Error(error.to_string()));
+            }
         }
 
         let stale = self
