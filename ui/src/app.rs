@@ -130,6 +130,10 @@ pub struct Rewind {
     /// Top inset the system keeps clear (menu bar, camera housing), so the
     /// preview is never covered by the notch.
     safe_top: f32,
+    /// Images waiting for a render that no longer references them. Dropping one
+    /// while it is still in the painted tree lets GPUI re-upload it with no
+    /// owner, which leaks a frame per use.
+    graveyard: Vec<Arc<RenderImage>>,
     /// First and last frame of the range, shown side by side while it is being
     /// dragged.
     edge_frames: Option<(Arc<RenderImage>, Arc<RenderImage>)>,
@@ -177,6 +181,7 @@ impl Rewind {
             fps: 30.0,
             progress: 1.0,
             safe_top: 0.0,
+            graveyard: Vec::new(),
             edge_frames: None,
             edge_in_flight: false,
             edge_pending: None,
@@ -238,9 +243,10 @@ impl Rewind {
             .as_ref()
             .err()
             .map(|error| Status::Error(error.to_string()));
+        // Dropped through GPUI, not just discarded: a frame still in the sprite
+        // atlas stays resident even when nothing references it.
+        self.release_images(cx);
         self.frame = None;
-        self.edge_frames = None;
-        self.thumbnails = Vec::new();
         self.drag = None;
         self.closing = false;
         self.copy_failed = false;
@@ -313,6 +319,10 @@ impl Rewind {
                         if let (Ok(first), Ok(last)) =
                             (build_image(first.clone()), build_image(last.clone()))
                         {
+                            if let Some((old_first, old_last)) = view.edge_frames.take() {
+                                view.graveyard.push(old_first);
+                                view.graveyard.push(old_last);
+                            }
                             view.edge_frames = Some((first, last));
                         }
                     }
@@ -350,6 +360,9 @@ impl Rewind {
                 if let Ok(Reply::Images(images)) = reply {
                     if let Some(first) = images.first() {
                         view.thumbnail_aspect = first.width as f32 / first.height.max(1) as f32;
+                    }
+                    for thumbnail in view.thumbnails.drain(..) {
+                        view.graveyard.push(thumbnail);
                     }
                     view.thumbnails = images
                         .into_iter()
@@ -389,8 +402,25 @@ impl Rewind {
     /// The overlay stays resident between uses so the hotkey is instant; this
     /// is its "close". The frame is dropped so a hidden overlay holds no
     /// 11 MB image.
+    /// GPUI keeps every `RenderImage` it paints in a sprite atlas until told
+    /// otherwise, so a new preview frame per scrub step grows without bound
+    /// until the old ones are dropped.
+    fn release_images(&mut self, _cx: &mut Context<Self>) {
+        if let Some(frame) = self.frame.take() {
+            self.graveyard.push(frame);
+        }
+        for thumbnail in self.thumbnails.drain(..) {
+            self.graveyard.push(thumbnail);
+        }
+        if let Some((first, last)) = self.edge_frames.take() {
+            self.graveyard.push(first);
+            self.graveyard.push(last);
+        }
+    }
+
     fn hide(&mut self, cx: &mut Context<Self>) {
         self.stop_playback();
+        self.release_images(cx);
         self.frame = None;
         self.drag = None;
         self.closing = false;
@@ -562,7 +592,9 @@ impl Rewind {
                 self.frame_size = (image.width, image.height);
                 match build_image(image) {
                     Ok(image) => {
-                        self.frame = Some(image);
+                        if let Some(previous) = self.frame.replace(image) {
+                            self.graveyard.push(previous);
+                        }
                         if matches!(self.status, Some(Status::Error(_))) {
                             self.status = None;
                         }
@@ -920,6 +952,12 @@ impl Rewind {
 
 impl Render for Rewind {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Anything queued from the last frame is no longer referenced by the
+        // tree about to be replaced, so it can go now.
+        for image in std::mem::take(&mut self.graveyard) {
+            cx.drop_image(image, Some(window));
+        }
+
         // Nothing else in the overlay is focusable, and the window can lose key
         // status when another app activates itself, which silently drops Space,
         // Enter and Escape. Re-assert focus on every frame.
