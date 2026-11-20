@@ -24,3 +24,11 @@ enum LoginItem {
         }
     }
 }
+
+enum LoginItemError: Error, CustomStringConvertible {
+    case notBundled
+
+    var description: String {
+        "login items need the app bundle; run this from /Applications/Rewind.app"
+    }
+}

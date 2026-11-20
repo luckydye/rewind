@@ -3,6 +3,9 @@ import RewindKit
 
 enum Command {
     case daemon
+    /// Registers or removes the login item, so `make install` can install the
+    /// service rather than asking the user to click a menu item.
+    case loginItem(enabled: Bool)
     case list
     case doctor
     case run(RunOptions)
@@ -39,6 +42,8 @@ enum Options {
 
         USAGE:
           rewindd                  run the daemon (menu bar item + IPC)
+          rewindd login-item on|off
+                                   register or remove the login item
           rewindd list             list displays and capturable applications
           rewindd doctor           permissions, displays, hardware encoder
           rewindd run [options]    capture in the foreground, for debugging
@@ -64,6 +69,13 @@ enum Options {
         switch arguments[1] {
         case "daemon":
             return .daemon
+        case "login-item":
+            guard arguments.count >= 3 else { throw OptionsError.missingValue("login-item on|off") }
+            switch arguments[2] {
+            case "on": return .loginItem(enabled: true)
+            case "off": return .loginItem(enabled: false)
+            default: throw OptionsError.invalidValue(flag: "login-item", value: arguments[2])
+            }
         case "list":
             return .list
         case "doctor":

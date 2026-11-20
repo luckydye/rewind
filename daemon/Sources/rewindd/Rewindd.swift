@@ -8,6 +8,8 @@ struct Rewindd {
             switch try Options.parse(CommandLine.arguments) {
             case .daemon:
                 try Daemon.run()
+            case .loginItem(let enabled):
+                try Commands.loginItem(enabled: enabled)
             case .list:
                 try runBlocking { try await Commands.list() }
             case .doctor:

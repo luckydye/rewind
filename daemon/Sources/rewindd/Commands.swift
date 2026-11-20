@@ -32,6 +32,16 @@ enum Commands {
         }
     }
 
+    /// Login item registration is only meaningful from inside the app bundle,
+    /// which is why `make install` shells out to it.
+    static func loginItem(enabled: Bool) throws {
+        guard LoginItem.isSupported else {
+            throw LoginItemError.notBundled
+        }
+        try LoginItem.set(enabled)
+        print("start at login: \(enabled ? "on" : "off")")
+    }
+
     static func doctor() async throws {
         print("macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)")
         print("screen recording permission: \(CGPreflightScreenCaptureAccess() ? "granted" : "NOT granted")")

@@ -107,6 +107,19 @@ make bundle     # dist/Rewind.app, ad-hoc signed, for the login item
 make doctor     # screen recording permission, display count, hardware encoder
 ```
 
+### Install
+
+```sh
+make install     # builds release, installs /Applications/Rewind.app,
+                 # registers it as a login item, starts it
+make uninstall   # removes the login item and the app
+```
+
+`make install` stops any development copy first. Because the bundle is signed
+ad-hoc, its Screen Recording grant is tied to that exact build, so macOS asks
+once after each install — allow it, then reopen the overlay. A Developer ID
+signature would keep the grant across rebuilds.
+
 Running the bare binary from a terminal inherits the terminal's Screen
 Recording permission, which is the friction-free way to develop. An ad-hoc
 signed bundle gets its own permission identity that changes on every rebuild,

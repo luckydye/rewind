@@ -3,7 +3,7 @@ DEBUG := $(DAEMON)/.build/debug
 RELEASE := $(DAEMON)/.build/release
 BUNDLE := dist/Rewind.app
 
-.PHONY: build ui ui-release daemon run bundle status list doctor measure clean
+.PHONY: build ui ui-release daemon run bundle install uninstall status list doctor measure clean
 
 # The daemon launches rewind-ui from its own directory, so the two binaries
 # have to sit next to each other in development too.
@@ -43,6 +43,29 @@ bundle: ui-release
 	@cp resources/Info.plist $(BUNDLE)/Contents/Info.plist
 	@codesign --force --sign - $(BUNDLE)
 	@echo "built $(BUNDLE)"
+
+APP := /Applications/Rewind.app
+
+# Installs the built bundle as a login item and starts it. The daemon is the
+# service; the overlay is preloaded by it.
+install: bundle
+	@pkill -x Rewind 2>/dev/null || true
+	@pkill -x rewindd 2>/dev/null || true
+	@pkill -x rewind-ui 2>/dev/null || true
+	@sleep 1
+	@rm -rf "$(APP)"
+	@cp -R $(BUNDLE) "$(APP)" || { echo "cannot write $(APP) — retry with: sudo make install"; exit 1; }
+	@echo "installed $(APP)"
+	@"$(APP)/Contents/MacOS/Rewind" login-item on || echo "could not register the login item; toggle 'Start at Login' in the menu bar"
+	@open "$(APP)"
+	@echo "Rewind is running. macOS will ask for Screen Recording once — allow it, then reopen the overlay."
+
+uninstall:
+	@"$(APP)/Contents/MacOS/Rewind" login-item off 2>/dev/null || true
+	@pkill -x Rewind 2>/dev/null || true
+	@pkill -x rewind-ui 2>/dev/null || true
+	@rm -rf "$(APP)"
+	@echo "removed $(APP)"
 
 measure: build
 	./scripts/measure.sh
