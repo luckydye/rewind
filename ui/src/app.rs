@@ -20,28 +20,28 @@ use crate::protocol::{ClipRange, Command, Request};
 
 // MARK: - Geometry
 
-const MARGIN: f32 = 24.0;
-const GAP: f32 = 16.0;
-const BAR_HEIGHT: f32 = 128.0;
-const BAR_PADDING: f32 = 16.0;
+const MARGIN: f32 = 12.0;
+const GAP: f32 = 8.0;
+const BAR_HEIGHT: f32 = 102.0;
+const BAR_PADDING: f32 = 6.0;
 
 /// Room for half a tick label beyond each end of the track, so "-0s" is not
 /// clipped by the bar's right edge.
-const RULER_INSET: f32 = 32.0;
+const RULER_INSET: f32 = 26.0;
 const LABEL_WIDTH: f32 = 44.0;
 
 /// Toolbar row: grouped controls in recessed pills.
-const TOOLBAR_Y: f32 = 10.0;
+const TOOLBAR_Y: f32 = 6.0;
 const TOOLBAR_H: f32 = 30.0;
 
 /// Ruler: bare numbers on the panel, with the playhead badge riding on it.
-const RULER_Y: f32 = 48.0;
-const RULER_H: f32 = 24.0;
+const RULER_Y: f32 = 38.0;
+const RULER_H: f32 = 22.0;
 
 /// Content row: the recessed strip the range block lives in.
-const ROW_Y: f32 = 78.0;
-const ROW_H: f32 = 38.0;
-const BLOCK_INSET: f32 = 5.0;
+const ROW_Y: f32 = 62.0;
+const ROW_H: f32 = 34.0;
+const BLOCK_INSET: f32 = 4.0;
 
 const HANDLE_REACH: f32 = 10.0;
 
@@ -681,7 +681,7 @@ impl Render for Rewind {
                 .top(px(image_top))
                 .w(px(image_width))
                 .h(px(image_height))
-                .rounded(px(14.0))
+                .rounded(px(10.0))
                 .overflow_hidden()
                 .border_1()
                 .border_color(rgba(BORDER))
@@ -698,7 +698,7 @@ impl Render for Rewind {
                 .top(px(image_top))
                 .w(px(image_width))
                 .h(px(image_height))
-                .rounded(px(14.0))
+                .rounded(px(10.0))
                 .bg(rgba(PANEL))
                 .border_1()
                 .border_color(rgba(BORDER))
@@ -794,7 +794,7 @@ impl Rewind {
             .h(px(TOOLBAR_H))
             .flex()
             .items_center()
-            .gap(px(16.0))
+            .gap(px(10.0))
             .child(transport)
             .child(
                 div()
@@ -825,7 +825,7 @@ impl Rewind {
             .h(px(TOOLBAR_H))
             .flex()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(4.0))
             .child(secondary)
             .child(
                 group().bg(rgba(ACCENT)).child(
@@ -860,7 +860,7 @@ impl Rewind {
                     .top(px(ROW_Y))
                     .w(px(bar_width - BAR_PADDING * 2.0))
                     .h(px(ROW_H))
-                    .rounded(px(12.0))
+                    .rounded(px(8.0))
                     .bg(rgba(SUNKEN)),
             )
             .child(
@@ -871,7 +871,7 @@ impl Rewind {
                     .top(px(block_top))
                     .w(px((to_x - from_x).max(2.0)))
                     .h(px(block_height))
-                    .rounded(px(8.0))
+                    .rounded(px(6.0))
                     .bg(rgba(ACCENT_FILL))
                     .border_1()
                     .border_color(rgba(ACCENT)),
@@ -894,7 +894,7 @@ impl Rewind {
                     .top(px(RULER_Y))
                     .w(px(BADGE_WIDTH))
                     .h(px(RULER_H))
-                    .rounded(px(8.0))
+                    .rounded(px(6.0))
                     .bg(rgba(PLAYHEAD))
                     .flex()
                     .items_center()
@@ -968,7 +968,7 @@ impl Rewind {
 
 fn panel() -> Div {
     div()
-        .rounded(px(20.0))
+        .rounded(px(12.0))
         .bg(rgba(PANEL))
         .border_1()
         .border_color(rgba(BORDER))
@@ -980,7 +980,7 @@ fn group() -> Div {
     div()
         .h(px(TOOLBAR_H))
         .px(px(2.0))
-        .rounded(px(9.0))
+        .rounded(px(8.0))
         .bg(rgba(GROUP))
         .flex()
         .items_center()
