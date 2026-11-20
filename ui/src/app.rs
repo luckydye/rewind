@@ -56,6 +56,7 @@ pub struct Rewind {
     exporting: bool,
     status: Option<Status>,
     ticker: Option<Task<()>>,
+    activated: bool,
 }
 
 impl Rewind {
@@ -89,6 +90,7 @@ impl Rewind {
             exporting: false,
             status,
             ticker: None,
+            activated: false,
         };
 
         view.request_frame(cx);
@@ -346,7 +348,19 @@ impl Rewind {
 // MARK: - Rendering
 
 impl Render for Rewind {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.activated {
+            self.activated = true;
+            cx.spawn(async move |_, cx| {
+                crate::activate::activate();
+                cx.background_executor()
+                    .timer(Duration::from_millis(120))
+                    .await;
+                crate::activate::activate();
+            })
+            .detach();
+        }
+
         let viewport = window.viewport_size();
         let width: f32 = viewport.width.into();
         let height: f32 = viewport.height.into();
@@ -410,18 +424,18 @@ impl Render for Rewind {
             .h(px(TIMELINE_HEIGHT))
             .on_mouse_down(
                 MouseButton::Left,
-                _cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
                     view.timeline_down(event.position.x.into(), left, track_width, cx)
                 }),
             )
             .on_mouse_move(
-                _cx.listener(move |view, event: &MouseMoveEvent, _window, cx| {
+                cx.listener(move |view, event: &MouseMoveEvent, _window, cx| {
                     view.timeline_drag(event.position.x.into(), left, track_width, cx)
                 }),
             )
             .on_mouse_up(
                 MouseButton::Left,
-                _cx.listener(|view, _event: &MouseUpEvent, _window, cx| {
+                cx.listener(|view, _event: &MouseUpEvent, _window, cx| {
                     view.drag = None;
                     cx.notify();
                 }),
@@ -496,7 +510,7 @@ impl Render for Rewind {
                             .hover(|style| style.bg(rgba(0xFFFFFF14)))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                _cx.listener(|view, _event: &MouseDownEvent, _window, cx| {
+                                cx.listener(|view, _event: &MouseDownEvent, _window, cx| {
                                     view.toggle_play(cx)
                                 }),
                             )
@@ -506,7 +520,11 @@ impl Render for Rewind {
                         div()
                             .text_sm()
                             .text_color(rgba(TEXT_DIM))
-                            .child(format_seconds(self.playhead)),
+                            .child(format!(
+                                "{:.1}s / {:.1}s",
+                                self.sel_from - self.playhead,
+                                self.selection_duration()
+                            )),
                     )
                     .child(separator())
                     .child(
@@ -517,11 +535,11 @@ impl Render for Rewind {
                     )
                     .child(button("Export", true).on_mouse_down(
                         MouseButton::Left,
-                        _cx.listener(|view, _event: &MouseDownEvent, _window, cx| view.export(cx)),
+                        cx.listener(|view, _event: &MouseDownEvent, _window, cx| view.export(cx)),
                     ))
                     .child(button("Close", false).on_mouse_down(
                         MouseButton::Left,
-                        _cx.listener(|_view, _event: &MouseDownEvent, _window, cx| cx.quit()),
+                        cx.listener(|_view, _event: &MouseDownEvent, _window, cx| cx.quit()),
                     )),
             );
 
@@ -532,7 +550,7 @@ impl Render for Rewind {
             .size_full()
             .bg(rgba(SCRIM))
             .track_focus(&self.focus)
-            .on_key_down(_cx.listener(Self::on_key))
+            .on_key_down(cx.listener(Self::on_key))
             .child(
                 div()
                     .flex_1()
@@ -650,6 +668,7 @@ pub fn run() {
                 Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(900.0)))
             });
         let display_id = display.as_ref().map(|display| display.id());
+        let display_size = bounds.size;
 
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -679,10 +698,11 @@ pub fn run() {
         })
         .expect("could not open the rewind window");
 
-        // A PopUp window draws above everything but does not take focus by
-        // itself, so without this every keystroke still goes to whatever was
-        // frontmost before the overlay opened.
+        crate::activate::make_borderless(
+            f32::from(display_size.width),
+            f32::from(display_size.height),
+        );
+
         cx.activate(true);
-        crate::activate::activate();
     });
 }

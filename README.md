@@ -137,12 +137,18 @@ Two things are non-obvious in the implementation:
 - **The window cannot be laid out with nested flex containers.** The timeline
   has to turn a window-space mouse position into a timestamp, so its geometry
   is computed from the viewport size and kept explicit.
-- **Activation has to be done by hand.** GPUI 0.2.2 calls
-  `-[NSApplication activateIgnoringOtherApps:]`, a no-op since macOS 14. The
-  overlay drew above everything but every keystroke still went to the app that
-  was frontmost before. `ui/src/activate.rs` sends the modern
-  `-[NSApplication activate]` directly. Making the UI an `.app` bundle instead
-  does *not* fix it — that was measured, not assumed.
+- **The window is not borderless out of the box.** GPUI always sets
+  `NSWindowStyleMaskTitled`, so the overlay came up with traffic lights,
+  rounded corners, and content pushed down by a titlebar. `ui/src/activate.rs`
+  strips the style mask to `Borderless` and pins the frame to the display.
+  A plain `titlebar: None` is not enough — GPUI still creates a titled window.
+- **Activation has to be done by hand, twice.** GPUI 0.2.2 calls
+  `-[NSApplication activateIgnoringOtherApps:]`, a no-op since macOS 14, so the
+  overlay drew above everything while every keystroke went to the app that was
+  frontmost before. The modern `-[NSApplication activate]` fixes it, but it
+  races window ordering and is silently dropped maybe one time in three, so it
+  is re-asserted from the first render with `makeKeyAndOrderFront:`. Making the
+  UI an `.app` bundle does *not* fix it — that was measured, not assumed.
 
 Known gaps: dragging a clip out to Finder needs `NSFilePromiseProvider`, which
 GPUI cannot reach; the overlay covers the primary display only; and a range
