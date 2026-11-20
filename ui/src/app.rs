@@ -1306,13 +1306,11 @@ impl Rewind {
             )
             .child(secondary)
             .child(
-                group().bg(rgba(ACCENT)).child(
-                    label_button(if self.exporting { "Exporting…" } else { "Export" })
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|view, _: &MouseDownEvent, _window, cx| view.export(cx)),
-                        ),
-                ),
+                primary_button(if self.exporting { "Exporting…" } else { "Export" })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _: &MouseDownEvent, _window, cx| view.export(cx)),
+                    ),
             )
             .child(icon_button("✕").on_mouse_down(
                 MouseButton::Left,
@@ -1591,6 +1589,24 @@ fn segment(label: &'static str, active: bool) -> Div {
         .bg(rgba(if active { 0xFFFFFF1F } else { 0x00000000 }))
         .cursor_pointer()
         .hover(|style| style.bg(rgba(0xFFFFFF14)))
+        .child(label)
+}
+
+/// The one primary action. A tinted accent rather than a solid fill: a full
+/// strength blue block at this size dominated the whole bar.
+fn primary_button(label: &'static str) -> Div {
+    div()
+        .h(px(CONTROL_H))
+        .px(px(14.0))
+        .rounded(px(CONTROL_RADIUS))
+        .bg(rgba(0x2F7CF63D))
+        .flex()
+        .items_center()
+        .text_xs()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgba(0x7FB2FFFF))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(0x2F7CF659)))
         .child(label)
 }
 
