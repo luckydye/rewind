@@ -88,9 +88,9 @@ actor Recorder {
         )
     }
 
-    func export(seconds: Double, path: String?) async throws -> Clip {
+    func export(from: Double, to: Double, path: String?) async throws -> Clip {
         guard let ring, let encoder else { throw RecorderError.notRecording }
-        let snapshot = try ring.snapshot(last: seconds)
+        let snapshot = try ring.snapshot(from: from, to: to)
         let url = path.map { URL(fileURLWithPath: $0) } ?? Self.newClipURL()
 
         let result = try await Task.detached {

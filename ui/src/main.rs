@@ -1,19 +1,27 @@
+mod activate;
+mod app;
 mod ipc;
 mod protocol;
 
 use std::fs;
 
-use protocol::{Command, Request};
+use protocol::{ClipRange, Command, Request};
 
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    if let Err(message) = run(&arguments) {
+
+    if arguments.is_empty() {
+        app::run();
+        return;
+    }
+
+    if let Err(message) = run_cli(&arguments) {
         eprintln!("rewind-ui: {message}");
         std::process::exit(1);
     }
 }
 
-fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+fn run_cli(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let client = ipc::Client::new();
 
     match arguments.first().map(String::as_str) {
@@ -65,11 +73,13 @@ fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
         Some("export") => {
             let seconds = flag(arguments, "--seconds").unwrap_or(30.0);
+            let from = flag(arguments, "--from").unwrap_or(seconds);
+            let to = flag(arguments, "--to").unwrap_or(0.0);
             let out = option(arguments, "--out");
 
             let mut request = Request::new(Command::ExportClip);
-            request.seconds = Some(seconds);
             request.path = out;
+            request.range = Some(ClipRange { from, to });
             let response = ipc::call(&client, request)?;
             let clip = response.clip.ok_or("export returned no clip")?;
             println!(
@@ -103,9 +113,7 @@ fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Some(other) => return Err(format!("unknown command '{other}'").into()),
-        None => {
-            return Err("usage: rewind-ui status | preview | export | displays | apps | quit".into());
-        }
+        None => return Err("expected a command".into()),
     }
 
     Ok(())

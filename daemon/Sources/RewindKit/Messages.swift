@@ -1,5 +1,18 @@
 import Foundation
 
+/// A slice of the rolling buffer, measured in seconds before now.
+public struct ClipRange: Codable, Sendable {
+    public var from: Double
+    public var to: Double
+
+    public init(from: Double, to: Double) {
+        self.from = from
+        self.to = to
+    }
+
+    public var duration: Double { from - to }
+}
+
 public enum Command: String, Codable, Sendable {
     case status
     case start
@@ -9,6 +22,7 @@ public enum Command: String, Codable, Sendable {
     case listDisplays
     case listApplications
     case previewFrame
+    case openUI
     case quit
 }
 
@@ -21,6 +35,7 @@ public struct Request: Codable, Sendable {
     public var path: String?
     public var width: Int?
     public var count: Int?
+    public var range: ClipRange?
 
     public init(
         command: Command,
@@ -28,7 +43,8 @@ public struct Request: Codable, Sendable {
         seconds: Double? = nil,
         path: String? = nil,
         width: Int? = nil,
-        count: Int? = nil
+        count: Int? = nil,
+        range: ClipRange? = nil
     ) {
         self.command = command
         self.config = config
@@ -36,6 +52,7 @@ public struct Request: Codable, Sendable {
         self.path = path
         self.width = width
         self.count = count
+        self.range = range
     }
 }
 

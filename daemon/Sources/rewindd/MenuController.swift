@@ -7,6 +7,7 @@ import RewindKit
 /// second run loop just to draw an icon.
 final class MenuController: NSObject, NSMenuDelegate {
     private let recorder: Recorder
+    private let launcher: UILauncher
     private let statusItem: NSStatusItem
     private let menu = NSMenu()
 
@@ -15,8 +16,9 @@ final class MenuController: NSObject, NSMenuDelegate {
     private var cachedApplications: [ApplicationInfo] = []
     private var refreshTask: Task<Void, Never>?
 
-    init(recorder: Recorder) {
+    init(recorder: Recorder, launcher: UILauncher) {
         self.recorder = recorder
+        self.launcher = launcher
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
     }
@@ -57,6 +59,14 @@ final class MenuController: NSObject, NSMenuDelegate {
         )
         toggle.target = self
         menu.addItem(toggle)
+
+        let open = NSMenuItem(
+            title: "Open Rewind…",
+            action: #selector(openRewind),
+            keyEquivalent: ""
+        )
+        open.target = self
+        menu.addItem(open)
 
         menu.addItem(captureMenu())
         menu.addItem(.separator())
@@ -152,6 +162,10 @@ final class MenuController: NSObject, NSMenuDelegate {
     }
 
     // MARK: - Actions
+
+    @objc func openRewind() {
+        launcher.open()
+    }
 
     @objc func toggleRecording() {
         let shouldStop = snapshot?.recording == true

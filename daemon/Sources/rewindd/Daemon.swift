@@ -25,9 +25,10 @@ enum Daemon {
         signal(SIGPIPE, SIG_IGN)
 
         let recorder = Recorder(config: ConfigStore.load())
+        let launcher = UILauncher()
         let path = SocketPath.default
         let server = IPCServer(path: path) { request in
-            await Router.handle(request, recorder: recorder)
+            await Router.handle(request, recorder: recorder, launcher: launcher)
         }
         try server.start()
 
@@ -38,7 +39,7 @@ enum Daemon {
         app.setActivationPolicy(.accessory)
         app.delegate = delegate
 
-        let menu = MenuController(recorder: recorder)
+        let menu = MenuController(recorder: recorder, launcher: launcher)
         Retain.menu = menu
         menu.install()
 
@@ -46,6 +47,11 @@ enum Daemon {
         terminate.setEventHandler { NSApp.terminate(nil) }
         terminate.resume()
         signal(SIGTERM, SIG_IGN)
+
+        HotKeyCenter.shared.action = { launcher.open() }
+        if !HotKeyCenter.shared.register() {
+            FileHandle.standardError.write(Data("rewindd: running without a hotkey\n".utf8))
+        }
 
         FileHandle.standardError.write(Data("rewindd: listening on \(path)\n".utf8))
         Task { await recorder.start() }

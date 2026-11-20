@@ -64,7 +64,17 @@ pub enum Command {
     ListDisplays,
     ListApplications,
     PreviewFrame,
+    #[serde(rename = "openUI")]
+    OpenUi,
     Quit,
+}
+
+/// A slice of the rolling buffer, measured in seconds before now.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipRange {
+    pub from: f64,
+    pub to: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +89,8 @@ pub struct Request {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub width: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<ClipRange>,
 }
 
 impl Request {
@@ -89,10 +101,14 @@ impl Request {
             seconds: None,
             path: None,
             width: None,
+            range: None,
         }
     }
 }
 
+/// Mirrors the daemon's state in full, including fields the overlay does not
+/// read yet; the wire format is the contract, not this crate's usage.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct State {

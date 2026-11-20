@@ -81,7 +81,7 @@ enum Commands {
         print(statisticsLine(stopped))
 
         if let path = options.exportPath {
-            let clip = try await recorder.export(seconds: options.clipSeconds, path: path)
+            let clip = try await recorder.export(from: options.clipSeconds, to: 0, path: path)
             print(
                 String(
                     format: "exported %@ — %.2fs, %.1fMB, %d frames of %dx%d",

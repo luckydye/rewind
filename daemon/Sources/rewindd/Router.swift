@@ -3,7 +3,7 @@ import Foundation
 import RewindKit
 
 enum Router {
-    static func handle(_ request: Request, recorder: Recorder) async -> Reply {
+    static func handle(_ request: Request, recorder: Recorder, launcher: UILauncher) async -> Reply {
         do {
             switch request.command {
             case .status:
@@ -22,10 +22,21 @@ enum Router {
                 return .json(Response(ok: true, state: await recorder.apply(config)))
 
             case .exportClip:
-                let seconds = request.seconds ?? 30
-                guard seconds > 0 else { return .json(.failure("seconds must be positive")) }
-                let clip = try await recorder.export(seconds: seconds, path: request.path)
+                let range = request.range
+                    ?? ClipRange(from: request.seconds ?? 30, to: 0)
+                guard range.to >= 0, range.duration > 0 else {
+                    return .json(.failure("range needs from > to >= 0"))
+                }
+                let clip = try await recorder.export(
+                    from: range.from,
+                    to: range.to,
+                    path: request.path
+                )
                 return .json(Response(ok: true, state: await recorder.state(), clip: clip))
+
+            case .openUI:
+                launcher.open()
+                return .json(Response(ok: true))
 
             case .listDisplays:
                 return .json(Response(ok: true, displays: try await recorder.displays()))

@@ -67,6 +67,7 @@ pub fn default_socket_path() -> PathBuf {
     PathBuf::from(home).join("Library/Application Support/Rewind/rewindd.sock")
 }
 
+#[derive(Clone)]
 pub struct Client {
     path: PathBuf,
 }
@@ -76,10 +77,6 @@ impl Client {
         Self {
             path: default_socket_path(),
         }
-    }
-
-    pub fn with_path(path: PathBuf) -> Self {
-        Self { path }
     }
 
     pub fn send(&self, request: &Request) -> Result<Reply, Error> {

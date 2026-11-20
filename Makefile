@@ -3,24 +3,21 @@ DEBUG := $(DAEMON)/.build/debug
 RELEASE := $(DAEMON)/.build/release
 BUNDLE := dist/Rewind.app
 
-.PHONY: build release bundle daemon run status list doctor ui measure clean
+.PHONY: build ui ui-release daemon run bundle status list doctor measure clean
 
-build:
+# The daemon launches rewind-ui from its own directory, so the two binaries
+# have to sit next to each other in development too.
+build: ui
 	cd $(DAEMON) && swift build
+	@cp ui/target/debug/rewind-ui $(DEBUG)/rewind-ui
 
-release:
-	cd $(DAEMON) && swift build -c release
+ui:
+	cd ui && cargo build
 
-bundle: release
-	@rm -rf $(BUNDLE)
-	@mkdir -p $(BUNDLE)/Contents/MacOS
-	@cp $(RELEASE)/rewindd $(BUNDLE)/Contents/MacOS/Rewind
-	@cp resources/Info.plist $(BUNDLE)/Contents/Info.plist
-	@codesign --force --sign - $(BUNDLE)
-	@echo "built $(BUNDLE)"
+ui-release:
+	cd ui && cargo build --release
 
 daemon: build
-	$(DEBUG)/rewindd
 
 run: build
 	$(DEBUG)/rewindd run
@@ -34,8 +31,15 @@ list: build
 doctor: build
 	$(DEBUG)/rewindd doctor
 
-ui:
-	cd ui && cargo build
+bundle: ui-release
+	cd $(DAEMON) && swift build -c release
+	@rm -rf $(BUNDLE)
+	@mkdir -p $(BUNDLE)/Contents/MacOS
+	@cp $(RELEASE)/rewindd $(BUNDLE)/Contents/MacOS/Rewind
+	@cp ui/target/release/rewind-ui $(BUNDLE)/Contents/MacOS/rewind-ui
+	@cp resources/Info.plist $(BUNDLE)/Contents/Info.plist
+	@codesign --force --sign - $(BUNDLE)
+	@echo "built $(BUNDLE)"
 
 measure: build
 	./scripts/measure.sh

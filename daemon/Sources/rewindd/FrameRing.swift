@@ -50,20 +50,22 @@ final class FrameRing {
         evict()
     }
 
-    /// Returns the frames covering the last `seconds`, cut at the last keyframe
-    /// before the window start so the clip can be decoded without re-encoding.
-    func snapshot(last seconds: TimeInterval) throws -> RingSnapshot {
+    /// Returns the frames between `from` and `to` seconds before now, cut at the
+    /// last keyframe before `from` so the clip decodes without re-encoding.
+    func snapshot(from secondsAgo: TimeInterval, to endSecondsAgo: TimeInterval) throws -> RingSnapshot {
         lock.lock()
         defer { lock.unlock() }
 
         guard let last = frames.last else { throw FrameRingError.empty }
-        let windowStart = last.presentationTimeStamp.seconds - seconds
+        let now = last.presentationTimeStamp.seconds
+        let windowStart = now - secondsAgo
+        let windowEnd = now - endSecondsAgo
 
         // Find where the window begins by timestamp, then walk back to the
         // nearest keyframe. Scanning every frame for keyframes here would cost
         // one CoreMedia attachment lookup per frame on every preview request.
         let boundary = frames.firstIndex {
-            $0.presentationTimeStamp.seconds > windowStart
+            $0.presentationTimeStamp.seconds >= windowStart
         } ?? frames.count - 1
 
         var start: Int?
@@ -73,7 +75,12 @@ final class FrameRing {
         }
         guard let start else { throw FrameRingError.noKeyframeAlignment }
 
-        let slice = Array(frames[start...])
+        let end = frames.lastIndex {
+            $0.presentationTimeStamp.seconds <= windowEnd
+        } ?? start
+        guard end >= start else { throw FrameRingError.empty }
+
+        let slice = Array(frames[start...end])
         let duration = slice.last!.presentationTimeStamp.seconds
             - slice.first!.presentationTimeStamp.seconds
 
@@ -82,6 +89,10 @@ final class FrameRing {
             duration: duration,
             bytes: slice.reduce(0) { $0 + CMSampleBufferGetTotalSampleSize($1) }
         )
+    }
+
+    func snapshot(last seconds: TimeInterval) throws -> RingSnapshot {
+        try snapshot(from: seconds, to: 0)
     }
 
     func statistics() -> (bytes: Int, duration: TimeInterval, frames: Int) {

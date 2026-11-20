@@ -11,12 +11,12 @@ Three pieces, each doing only what the others cannot.
 ┌──────────────────────────────────┐         ┌───────────────────────────────┐
 │ rewindd  (Swift)                 │  unix   │ rewind-ui  (Rust + GPUI)      │
 │                                  │ socket  │                               │
-│ menu bar status item             │◄───────►│ rewind mode: timeline,        │
-│ SCStream capture                 │  JSON   │ scrubber, clip library        │
-│ VideoToolbox HEVC encode         │ frames  │                               │
-│ rolling encoded-frame ring       │         │ launched on demand,           │
-│ clip export (AVAssetWriter)      │         │ exits when dismissed          │
-│ power policy                     │         │                               │
+│ menu bar status item             │◄───────►│ full-screen overlay:          │
+│ SCStream capture                 │  JSON   │ scrim, frame, timeline,       │
+│ VideoToolbox HEVC encode         │ + BGRA  │ range selection, toolbar      │
+│ rolling encoded-frame ring       │         │                               │
+│ preview decode + clip export     │         │ spawned on Cmd+Shift+S,       │
+│ global hotkey (Carbon)           │         │ exits on Escape               │
 └──────────────────────────────────┘         └───────────────────────────────┘
                     ▲
                     │  rewindctl (debugging)
@@ -113,6 +113,41 @@ rewindctl displays | apps
 
 Clips default to `~/Movies/Rewind/`.
 
+## The overlay
+
+`Cmd+Shift+S` (registered by the daemon with Carbon's `RegisterEventHotKey`,
+which needs no accessibility permission) spawns `rewind-ui`. It opens a
+full-screen, transparent, `PopUp`-level window over everything: the desktop is
+dimmed, the frame under the playhead sits in the middle, and a floating toolbar
+sits at the bottom like the macOS screenshot tool.
+
+| input | |
+|---|---|
+| drag the timeline | scrub; the preview follows |
+| drag a handle | set the export range |
+| Space | play the selection, looping |
+| ← / → | nudge the playhead |
+| Return | export |
+| Escape | close |
+
+Export writes to `~/Movies/Rewind/` and reveals the file in Finder.
+
+Two things are non-obvious in the implementation:
+
+- **The window cannot be laid out with nested flex containers.** The timeline
+  has to turn a window-space mouse position into a timestamp, so its geometry
+  is computed from the viewport size and kept explicit.
+- **Activation has to be done by hand.** GPUI 0.2.2 calls
+  `-[NSApplication activateIgnoringOtherApps:]`, a no-op since macOS 14. The
+  overlay drew above everything but every keystroke still went to the app that
+  was frontmost before. `ui/src/activate.rs` sends the modern
+  `-[NSApplication activate]` directly. Making the UI an `.app` bundle instead
+  does *not* fix it — that was measured, not assumed.
+
+Known gaps: dragging a clip out to Finder needs `NSFilePromiseProvider`, which
+GPUI cannot reach; the overlay covers the primary display only; and a range
+export can start up to a second early because it cuts on the previous keyframe.
+
 ### Protocol
 
 Unix socket at `~/Library/Application Support/Rewind/rewindd.sock`, mode 0600.
@@ -136,7 +171,13 @@ daemon in a half-written state.
 ```
 
 Commands: `status`, `start`, `stop`, `setConfig`, `exportClip`,
-`listDisplays`, `listApplications`, `previewFrame`, `previewBatch`, `quit`.
+`listDisplays`, `listApplications`, `previewFrame`, `openUI`, `quit`.
+
+`exportClip` takes a range measured in seconds before now:
+
+```jsonc
+{ "command": "exportClip", "range": { "from": 12.0, "to": 4.0 } }
+```
 
 ### Preview frames
 
@@ -209,8 +250,9 @@ rewindd run --seconds 10 --stats 3 --clip 5 --export /tmp/clip.mp4
 - [x] capture → HEVC → keyframe-aligned ring → export
 - [x] daemon: unix-socket IPC, menu bar item, persisted config, login item
 - [x] preview decode path: on-demand frames and batches over the socket
-- [ ] `rewind-ui`: GPUI overlay, timeline scrubber, live playback, drag-out
-- [ ] global hotkey in the daemon (GPUI cannot register one)
+- [x] `rewind-ui`: GPUI overlay, timeline scrubber, range export, live preview
+- [x] global hotkey in the daemon (GPUI cannot register one)
+- [ ] drag a clip out to Finder, copy a file reference to the clipboard
 - [ ] power policy: AC/battery, low power mode, thermal state, screen lock
 - [ ] audio: system audio tap, optional microphone
 - [ ] thumbnails for the timeline (daemon renders, UI displays)

@@ -31,7 +31,7 @@ private func usage() -> Never {
         USAGE:
           rewindctl status [--json]
           rewindctl start | stop | quit
-          rewindctl export [--seconds N] [--out PATH]
+          rewindctl export [--seconds N | --from A --to B] [--out PATH]
           rewindctl config [--buffer S] [--fps N] [--height PX] [--display N]
                            [--app BUNDLE_ID | --whole-screen] [--bitrate B]
           rewindctl preview --ago SECONDS [--width PX] [--out clip.png]
@@ -165,9 +165,17 @@ do {
 
     case "export":
         let seconds = option("--seconds", arguments).flatMap(Double.init) ?? 30
+        let from = option("--from", arguments).flatMap(Double.init) ?? seconds
+        let to = option("--to", arguments).flatMap(Double.init) ?? 0
         let out = option("--out", arguments)
         let response = try json(
-            try client.send(Request(command: .exportClip, seconds: seconds, path: out))
+            try client.send(
+                Request(
+                    command: .exportClip,
+                    path: out,
+                    range: ClipRange(from: from, to: to)
+                )
+            )
         )
         guard response.ok, let clip = response.clip else {
             fail(response.error ?? "unexpected response")
