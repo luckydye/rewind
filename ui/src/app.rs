@@ -486,10 +486,20 @@ impl Render for Rewind {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(8.0))
-                            .px(px(8.0))
+                            .justify_center()
+                            .w(px(34.0))
+                            .h(px(30.0))
+                            .rounded(px(9.0))
                             .text_sm()
                             .text_color(rgba(TEXT))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgba(0xFFFFFF14)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                _cx.listener(|view, _event: &MouseDownEvent, _window, cx| {
+                                    view.toggle_play(cx)
+                                }),
+                            )
                             .child(if self.playing { "❚❚" } else { "▶" }),
                     )
                     .child(
