@@ -816,7 +816,6 @@ impl Rewind {
 
         self.closing = true;
         self.close_generation = self.close_generation.wrapping_add(1);
-        let generation = self.close_generation;
         self.stop_playback();
 
         if self.close_copy == CloseCopy::Clip {
@@ -830,7 +829,9 @@ impl Rewind {
             return;
         }
 
-        self.status = Some(Status::Info("copying frame…".into()));
+        // Hide now and copy behind: waiting for the daemon to decode and encode
+        // made the overlay sit there for half a second after Escape.
+        self.hide(cx);
         let seconds = self.playhead;
         let anchor = self.anchor;
         let client = self.client.clone();
@@ -846,20 +847,15 @@ impl Rewind {
                 })
                 .await;
 
-            this.update(cx, |view, cx| match result {
-                Ok(_) => {
-                    if view.close_generation == generation {
-                        view.hide(cx);
-                    }
-                }
-                Err(error) => {
-                    view.closing = false;
+            this.update(cx, |view, cx| {
+                // The overlay is already hidden, so a late failure can only be
+                // reported the next time it opens.
+                if let Err(error) = result {
                     view.copy_failed = true;
-                    view.status = Some(Status::Error(format!(
-                        "copy failed: {error} — close again to dismiss"
-                    )));
-                    cx.notify();
+                    view.status =
+                        Some(Status::Error(format!("last copy failed: {error}")));
                 }
+                cx.notify();
             })
             .ok();
         })
