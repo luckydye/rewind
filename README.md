@@ -5,18 +5,21 @@ worth keeping happens, save the last N seconds without having been recording.
 
 ## Architecture
 
-Three pieces, each doing only what the other cannot.
+Three pieces, each doing only what the others cannot.
 
 ```
-┌─────────────────────────────┐        ┌──────────────────────────────┐
-│ rewindd  (Swift)            │  unix  │ rewind-ui  (Rust + GPUI)     │
-│                             │ socket │                              │
-│ menu bar status item        │◄──────►│ rewind mode: timeline,       │
-│ SCStream capture            │  JSON  │ scrubber, clip library       │
-│ VideoToolbox HEVC encode    │ frames │                              │
-│ rolling encoded-frame ring  │        │ launched on demand,          │
-│ clip export (AVAssetWriter) │        │ exits when dismissed         │
-└─────────────────────────────┘        └──────────────────────────────┘
+┌──────────────────────────────────┐         ┌───────────────────────────────┐
+│ rewindd  (Swift)                 │  unix   │ rewind-ui  (Rust + GPUI)      │
+│                                  │ socket  │                               │
+│ menu bar status item             │◄───────►│ rewind mode: timeline,        │
+│ SCStream capture                 │  JSON   │ scrubber, clip library        │
+│ VideoToolbox HEVC encode         │ frames  │                               │
+│ rolling encoded-frame ring       │         │ launched on demand,           │
+│ clip export (AVAssetWriter)      │         │ exits when dismissed          │
+│ power policy                     │         │                               │
+└──────────────────────────────────┘         └───────────────────────────────┘
+                    ▲
+                    │  rewindctl (debugging)
 ```
 
 `rewindd` is the only process that exists while nothing is happening, so it
@@ -25,12 +28,16 @@ ScreenCaptureKit and VideoToolbox are Objective-C frameworks with no viable
 Rust path — wrapping them would mean writing the same code behind an FFI
 boundary plus a Swift runtime to link against.
 
+It also owns the menu bar item. GPUI has no status-item API, and a "background
+recorder" that lives in the menu bar would otherwise need a second process with
+its own run loop just to draw an icon.
+
 The UI is Rust/GPUI because the rewind experience is where custom rendering
 pays for itself. It is a separate process, launched on demand, so a UI bug or
 crash cannot interrupt recording.
 
 Frames never leave `rewindd`: capture, encode, ring buffer and export all happen
-in one process, and the socket carries only control messages and metadata.
+in one process. The socket carries only control messages and metadata.
 
 ## Why this is cheap
 
@@ -69,28 +76,80 @@ entirely when the display blanks, which is what keeps a sleeping laptop free.
 ## Building
 
 ```sh
-make build      # builds rewindd
+make build      # rewindd + rewindctl (debug)
+make bundle     # dist/Rewind.app, ad-hoc signed, for the login item
 make doctor     # screen recording permission, display count, hardware encoder
-make list       # displays and capturable applications
 ```
 
-## Recording
+Running the bare binary from a terminal inherits the terminal's Screen
+Recording permission, which is the friction-free way to develop. An ad-hoc
+signed bundle gets its own permission identity that changes on every rebuild,
+so it re-prompts — that only matters for distribution, where you would sign
+with a stable Developer ID instead.
+
+## The daemon
 
 ```sh
-# 10 second run, then export the last 5 seconds
-.build/debug/rewindd run --seconds 10 --clip 5 --export /tmp/clip.mp4
+make daemon                 # menu bar item + socket, records immediately
+```
 
-# capture one application instead of the whole display
-.build/debug/rewindd run --app com.apple.Safari
+Menu bar: buffered seconds, start/stop, capture source (a display, or a single
+application), start at login, quit. The login item only appears in a bundled
+build, since `SMAppService.mainApp` needs a bundle identifier.
 
-# full option list
-.build/debug/rewindd --help
+Configuration is persisted to `~/Library/Application Support/Rewind/config.json`
+and restored on launch.
+
+Debugging client — every daemon feature is reachable without touching the menu:
+
+```sh
+rewindctl status
+rewindctl status --json
+rewindctl start | stop | quit
+rewindctl export --seconds 30 --out ~/Desktop/clip.mp4
+rewindctl config --fps 30 --buffer 60 --display 0 --app com.apple.Safari
+rewindctl displays | apps
+```
+
+Clips default to `~/Movies/Rewind/`.
+
+### Protocol
+
+Unix socket at `~/Library/Application Support/Rewind/rewindd.sock`, mode 0600.
+Frames are a big-endian `UInt32` byte count followed by UTF-8 JSON. One request
+in, one response out; there are no subscriptions, so a client that dies
+mid-request cannot leave the daemon in a half-written state.
+
+```jsonc
+// request
+{ "command": "exportClip", "seconds": 30, "path": null }
+
+// response (every field except ok is optional)
+{
+  "ok": true,
+  "state": { "recording": true, "config": { … }, "availableSeconds": 47.2, … },
+  "clip": { "path": "/Users/…/Rewind 2026-11-20 20.14.02.mp4",
+            "duration": 30.1, "bytes": 8123456, "frames": 903,
+            "width": 1662, "height": 1080 }
+}
+```
+
+Commands: `status`, `start`, `stop`, `setConfig`, `exportClip`,
+`listDisplays`, `listApplications`, `quit`.
+
+## Standalone capture
+
+`rewindd run` drives the same pipeline without the menu bar, for measurement
+and for checking the encode path in isolation:
+
+```sh
+rewindd run --seconds 10 --stats 3 --clip 5 --export /tmp/clip.mp4
 ```
 
 | flag | default | |
 |---|---|---|
 | `--buffer` | 60 | rolling buffer length in seconds |
-| `--clip` | 8 | exported clip length |
+| `--clip` | 8 | length of the clip exported at exit |
 | `--height` | 1080 | output height, width follows display aspect |
 | `--fps` | 30 | capture frame rate |
 | `--bitrate` | 5000000 | encoder ceiling, bit/s |
@@ -103,8 +162,8 @@ make list       # displays and capturable applications
 ## Roadmap
 
 - [x] capture → HEVC → keyframe-aligned ring → export
-- [ ] `rewindd` as a real daemon: unix-socket IPC, menu bar item, login item
-- [ ] power policy: AC/battery, low power mode, thermal state, screen lock
+- [x] daemon: unix-socket IPC, menu bar item, persisted config, login item
 - [ ] `rewind-ui`: GPUI timeline scrubber and clip library
+- [ ] power policy: AC/battery, low power mode, thermal state, screen lock
 - [ ] audio: system audio tap, optional microphone
 - [ ] thumbnails for the timeline (daemon renders, UI displays)

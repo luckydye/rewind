@@ -6,7 +6,6 @@ import VideoToolbox
 enum EncoderError: Error, CustomStringConvertible {
     case sessionCreationFailed(OSStatus)
     case propertyFailed(key: String, status: OSStatus)
-    case noHardwareEncoder
 
     var description: String {
         switch self {
@@ -14,32 +13,36 @@ enum EncoderError: Error, CustomStringConvertible {
             return "VTCompressionSessionCreate failed (\(status))"
         case .propertyFailed(let key, let status):
             return "failed to set \(key) (\(status))"
-        case .noHardwareEncoder:
-            return "this machine exposes no hardware HEVC encoder"
         }
     }
 }
 
-/// Hardware HEVC encoder. Frames are handed over as IOSurfaces owned by the
-/// capture pipeline; nothing is copied through the CPU.
+/// Hardware HEVC encoder. Frames are handed over as buffers owned by the capture
+/// pipeline; nothing is copied through the CPU.
 final class VideoEncoder {
     private var session: VTCompressionSession?
     private let onSample: (CMSampleBuffer) -> Void
+    private let stats: CaptureStats
+
+    private var lastKeyframeTime: CMTime?
+    private let keyframeInterval: Double
 
     private(set) var usesHardwareAcceleration = false
     private(set) var width = 0
     private(set) var height = 0
-    private(set) var encodedFrames = 0
-    private(set) var encodeErrors = 0
 
-    init(onSample: @escaping (CMSampleBuffer) -> Void) {
+    init(
+        stats: CaptureStats,
+        keyframeInterval: Double = 1,
+        onSample: @escaping (CMSampleBuffer) -> Void
+    ) {
+        self.stats = stats
+        self.keyframeInterval = keyframeInterval
         self.onSample = onSample
     }
 
     deinit {
-        if let session {
-            VTCompressionSessionInvalidate(session)
-        }
+        finish()
     }
 
     func prepare(width: Int, height: Int, fps: Int, bitrate: Int) throws {
@@ -80,11 +83,12 @@ final class VideoEncoder {
         try set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
         try set(kVTCompressionPropertyKey_AllowTemporalCompression, kCFBooleanTrue)
         try set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main_AutoLevel)
-        // A one second GOP bounds how much of the requested clip we can lose to
-        // keyframe alignment when exporting.
-        try set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, fps as CFNumber)
-        try set(kVTCompressionPropertyKey_MaxKeyFrameInterval, fps as CFNumber)
-        // Ceiling rather than a target: static screens cost nothing extra.
+        // Idle frames are never encoded, so the encoder's own frame-count based
+        // GOP drifts away from wall time and a "last 5 seconds" export can end
+        // up cutting at a keyframe from a minute ago. Keyframes are therefore
+        // forced from the presentation timestamp instead.
+        lastKeyframeTime = nil
+        // A ceiling rather than a target: static screens cost nothing extra.
         try set(kVTCompressionPropertyKey_DataRateLimits, [bitrate / 8, 1] as CFArray)
 
         usesHardwareAcceleration = readBool(kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder)
@@ -93,22 +97,41 @@ final class VideoEncoder {
 
     func encode(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
         guard let session else { return }
+
+        let elapsed = lastKeyframeTime.map { presentationTime.seconds - $0.seconds }
+            ?? .infinity
+        let forceKeyframe = elapsed >= keyframeInterval
+        if forceKeyframe {
+            lastKeyframeTime = presentationTime
+        }
+
         let status = VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pixelBuffer,
             presentationTimeStamp: presentationTime,
             duration: .invalid,
-            frameProperties: nil,
+            frameProperties: forceKeyframe
+                ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary
+                : nil,
             sourceFrameRefcon: nil,
             infoFlagsOut: nil
         )
         if status != noErr {
-            encodeErrors += 1
+            stats.recordError()
         }
     }
 
-    func handleOutput(_ sample: CMSampleBuffer) {
-        encodedFrames += 1
+    /// Drains any in-flight frames before the session goes away, so the bare
+    /// pointer handed to VT as refcon can never outlive this object.
+    func finish() {
+        guard let session else { return }
+        self.session = nil
+        VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        VTCompressionSessionInvalidate(session)
+    }
+
+    fileprivate func handleOutput(_ sample: CMSampleBuffer) {
+        stats.recordEncoded()
         onSample(sample)
     }
 

@@ -5,20 +5,27 @@ let package = Package(
     name: "Rewind",
     platforms: [.macOS(.v15)],
     products: [
-        .executable(name: "rewindd", targets: ["RewindDaemon"])
+        .executable(name: "rewindd", targets: ["rewindd"]),
+        .executable(name: "rewindctl", targets: ["rewindctl"]),
+        .library(name: "RewindKit", targets: ["RewindKit"]),
     ],
     targets: [
+        .target(
+            name: "RewindKit",
+            path: "Sources/RewindKit",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .executableTarget(
-            name: "RewindDaemon",
-            path: "Sources/RewindDaemon",
-            swiftSettings: [
-                // The capture pipeline is owned by a serial DispatchQueue, which
-                // Swift's actor model cannot express. Swift 6 strict concurrency
-                // would only force `@unchecked Sendable` annotations onto every
-                // stage, so the language mode stays at 5 and ownership is
-                // documented at each boundary instead.
-                .swiftLanguageMode(.v5)
-            ]
-        )
+            name: "rewindd",
+            dependencies: ["RewindKit"],
+            path: "Sources/rewindd",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .executableTarget(
+            name: "rewindctl",
+            dependencies: ["RewindKit"],
+            path: "Sources/rewindctl",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )

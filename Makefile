@@ -1,7 +1,9 @@
 DAEMON := daemon
-BIN := $(DAEMON)/.build/debug/rewindd
+DEBUG := $(DAEMON)/.build/debug
+RELEASE := $(DAEMON)/.build/release
+BUNDLE := dist/Rewind.app
 
-.PHONY: build release run list doctor measure clean
+.PHONY: build release bundle daemon run status list doctor measure clean
 
 build:
 	cd $(DAEMON) && swift build
@@ -9,17 +11,31 @@ build:
 release:
 	cd $(DAEMON) && swift build -c release
 
+bundle: release
+	@rm -rf $(BUNDLE)
+	@mkdir -p $(BUNDLE)/Contents/MacOS
+	@cp $(RELEASE)/rewindd $(BUNDLE)/Contents/MacOS/Rewind
+	@cp resources/Info.plist $(BUNDLE)/Contents/Info.plist
+	@codesign --force --sign - $(BUNDLE)
+	@echo "built $(BUNDLE)"
+
+daemon: build
+	$(DEBUG)/rewindd
+
 run: build
-	$(BIN) run
+	$(DEBUG)/rewindd run
+
+status: build
+	$(DEBUG)/rewindctl status
 
 list: build
-	$(BIN) list
+	$(DEBUG)/rewindd list
 
 doctor: build
-	$(BIN) doctor
+	$(DEBUG)/rewindd doctor
 
 measure: build
 	./scripts/measure.sh
 
 clean:
-	rm -rf $(DAEMON)/.build
+	rm -rf $(DAEMON)/.build dist
