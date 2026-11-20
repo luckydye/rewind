@@ -48,13 +48,24 @@ public struct DisplayInfo: Codable, Equatable, Sendable {
     public var width: Int
     public var height: Int
     public var isMain: Bool
+    /// Height of the area the system keeps clear at the top of this display:
+    /// the menu bar, and on a laptop with a camera housing, the notch.
+    public var safeAreaTop: Double
 
-    public init(index: Int, displayID: UInt32, width: Int, height: Int, isMain: Bool) {
+    public init(
+        index: Int,
+        displayID: UInt32,
+        width: Int,
+        height: Int,
+        isMain: Bool,
+        safeAreaTop: Double = 0
+    ) {
         self.index = index
         self.displayID = displayID
         self.width = width
         self.height = height
         self.isMain = isMain
+        self.safeAreaTop = safeAreaTop
     }
 
     public var name: String {

@@ -4,6 +4,17 @@ import RewindKit
 import ScreenCaptureKit
 
 enum ShareableContent {
+    /// `NSScreen.safeAreaInsets` is the only API that accounts for the camera
+    /// housing; `visibleFrame` only knows about the menu bar.
+    static func safeAreaTop(for displayID: CGDirectDisplayID) -> Double {
+        let key = NSDeviceDescriptionKey("NSScreenNumber")
+        for screen in NSScreen.screens
+        where (screen.deviceDescription[key] as? NSNumber)?.uint32Value == displayID {
+            return Double(screen.safeAreaInsets.top)
+        }
+        return 0
+    }
+
     static func displays() async throws -> [DisplayInfo] {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false,
@@ -15,7 +26,8 @@ enum ShareableContent {
                 displayID: display.displayID,
                 width: CGDisplayPixelsWide(display.displayID),
                 height: CGDisplayPixelsHigh(display.displayID),
-                isMain: CGDisplayIsMain(display.displayID) != 0
+                isMain: CGDisplayIsMain(display.displayID) != 0,
+                safeAreaTop: safeAreaTop(for: display.displayID)
             )
         }
     }

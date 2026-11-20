@@ -22,6 +22,7 @@ type SendObject = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
 type SendUnsigned = unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void;
 type SendPointer = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void;
 type SendPair = unsafe extern "C" fn(*mut c_void, *mut c_void, f64, f64) -> *mut c_void;
+type SendDouble = unsafe extern "C" fn(*mut c_void, *mut c_void, f64) -> *mut c_void;
 
 fn selector(name: &std::ffi::CStr) -> *mut c_void {
     unsafe { sel_registerName(name.as_ptr()) }
@@ -111,5 +112,37 @@ pub fn make_borderless(width: f32, height: f32) {
         // AppKit's origin is bottom-left of the screen; the primary display's
         // bottom-left is (0, 0) and the window is as tall as the display.
         set_pair(window, selector(c"setFrameOrigin:"), 0.0, 0.0);
+    }
+}
+
+/// Cross-fades the window in. AppKit animates `alphaValue` in the window
+/// server, so this costs no frames in our render loop — driving it from a step
+/// task inside GPUI meant the overlay was painted once and then left at
+/// whatever opacity that first frame had.
+pub fn start_fade() {
+    unsafe {
+        let window = only_window();
+        let set_double: SendDouble = std::mem::transmute(objc_msgSend as *const ());
+
+        let context_class = objc_getClass(c"NSAnimationContext".as_ptr());
+        assert!(!context_class.is_null(), "NSAnimationContext is not linked");
+        let send: SendObject = std::mem::transmute(objc_msgSend as *const ());
+
+        send(context_class, selector(c"beginGrouping"));
+        let context = send(context_class, selector(c"currentContext"));
+        set_double(context, selector(c"setDuration:"), 0.16);
+
+        let proxy = send(window, selector(c"animator"));
+        set_double(proxy, selector(c"setAlphaValue:"), 1.0);
+
+        send(context_class, selector(c"endGrouping"));
+    }
+}
+
+/// Starts the window fully transparent so `start_fade` has somewhere to go.
+pub fn prepare_fade() {
+    unsafe {
+        let set_double: SendDouble = std::mem::transmute(objc_msgSend as *const ());
+        set_double(only_window(), selector(c"setAlphaValue:"), 0.0);
     }
 }

@@ -38,6 +38,9 @@ pub struct DisplayInfo {
     pub width: i64,
     pub height: i64,
     pub is_main: bool,
+    /// Menu bar / camera housing the system keeps clear at the top.
+    #[serde(default)]
+    pub safe_area_top: f64,
 }
 
 impl DisplayInfo {

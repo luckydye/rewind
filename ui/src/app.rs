@@ -31,8 +31,8 @@ const MAX_BAR_WIDTH: f32 = 1100.0;
 
 /// Room for half a tick label beyond each end of the track, so "-0s" is not
 /// clipped by the bar's right edge.
-const RULER_INSET: f32 = 26.0;
-const LABEL_WIDTH: f32 = 44.0;
+const RULER_INSET: f32 = 22.0;
+const LABEL_WIDTH: f32 = 38.0;
 
 /// Toolbar row: grouped controls in recessed pills.
 const TOOLBAR_Y: f32 = 6.0;
@@ -60,6 +60,8 @@ const BADGE_WIDTH: f32 = 66.0;
 /// costs ~11 MB and about 40 ms round trip, which keeps scrubbing usable; the
 /// exported clip is full resolution either way.
 const PREVIEW_WIDTH: i64 = 2048;
+
+
 
 // MARK: - Palette
 
@@ -102,6 +104,9 @@ pub struct Rewind {
     anchor: Option<f64>,
     /// Capture frame rate, so frame stepping lands on real frames.
     fps: f64,
+    /// Top inset the system keeps clear (menu bar, camera housing), so the
+    /// preview is never covered by the notch.
+    safe_top: f32,
     playhead: f64,
     sel_from: f64,
     sel_to: f64,
@@ -134,6 +139,7 @@ impl Rewind {
             span: 1.0,
             anchor: None,
             fps: 30.0,
+            safe_top: 0.0,
             playhead: 0.0,
             sel_from: 0.0,
             sel_to: 0.0,
@@ -170,6 +176,10 @@ impl Rewind {
             .map(|state| state.config.fps as f64)
             .unwrap_or(30.0)
             .max(1.0);
+        self.safe_top = state
+            .and_then(|state| state.display.as_ref())
+            .map(|display| display.safe_area_top as f32)
+            .unwrap_or(0.0);
         self.sel_from = self.span.min(10.0);
         self.sel_to = 0.0;
         self.playhead = self.sel_from;
@@ -188,7 +198,11 @@ impl Rewind {
     pub fn show(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.refresh(cx);
         window.focus(&self.focus);
+        // Fade at the window-server level so it costs no frames here: the
+        // overlay is transparent, ordered front, then animated to opaque.
+        crate::activate::prepare_fade();
         crate::activate::activate();
+        crate::activate::start_fade();
         // Activation races window ordering and is sometimes dropped; asserting
         // it once more shortly after makes the overlay reliably take the keys.
         cx.spawn(async move |_, cx| {
@@ -482,9 +496,9 @@ impl Rewind {
         cx.notify();
     }
 
-    /// Two-finger horizontal scrubbing. The playhead follows the fingers:
-    /// swiping right moves it right, i.e. towards now. Mostly vertical swipes
-    /// are ignored so resting fingers or a diagonal flick do not seek.
+    /// Two-finger horizontal scrubbing. Inverted, like scrolling a page: swiping
+    /// right pulls the timeline back in time. Mostly vertical swipes are
+    /// ignored so resting fingers or a diagonal flick do not seek.
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let seconds = match event.delta {
             ScrollDelta::Pixels(delta) => {
@@ -506,7 +520,8 @@ impl Rewind {
         }
 
         self.stop_playback();
-        let next = self.playhead - seconds;
+        // Inverted: the timeline moves with the fingers, like scrolling a page.
+        let next = self.playhead + seconds;
         self.set_playhead(next, cx);
         cx.stop_propagation();
     }
@@ -730,7 +745,7 @@ impl Render for Rewind {
         let track_width = (bar_width - (BAR_PADDING + RULER_INSET) * 2.0).max(1.0);
 
         let stage_left = MARGIN;
-        let stage_top = MARGIN;
+        let stage_top = (self.safe_top + MARGIN * 0.5).max(MARGIN);
         let stage_width = (width - MARGIN * 2.0).max(1.0);
         let stage_height = (bar_top - GAP - stage_top).max(1.0);
 
@@ -1038,7 +1053,7 @@ impl Rewind {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_xs()
+                    .text_size(rems(0.625))
                     .text_color(rgba(MUTED))
                     .child(format!("−{:.0}s", ticks)),
             );
