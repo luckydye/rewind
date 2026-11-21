@@ -205,7 +205,10 @@ Drawing is one Ink brush with the same dynamics as the canvas: speed and pen
 pressure set the width, strokes are smoothed with a B-spline, and the first
 stretch of a mouse stroke grows in instead of starting as a blob. The drawing
 toolbar always floats down the left edge of the capture; `B` picks Ink, `E` the
-eraser, `[` / `]` change weight, `⌘Z` undoes and `⇧⌘Z` redoes. Annotations are
+eraser, `[` / `]` change weight, `⌘Z` undoes and `⇧⌘Z` redoes. The crop tool
+has no Apply step: a rectangle counts as soon as it is drawn, and copies and
+exports use it right away. Drag it or its corners to adjust, Reset to remove it,
+Escape or another tool to put the crop tool down. Annotations are
 normalised to the capture, so the preview, a copied image and an exported clip
 all get the same drawing: the UI rasterises the layer at native resolution,
 `rewindd` composites it into the copied frame, and annotated clips are

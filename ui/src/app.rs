@@ -188,8 +188,9 @@ enum CropHandle {
 /// What a press on the preview does in crop mode.
 #[derive(Clone, Copy)]
 enum CropDrag {
-    /// Laying a new rectangle from where the press began.
-    New { anchor: (f64, f64) },
+    /// Laying a new rectangle from where the press began. `previous` comes
+    /// back if the press turns out to be a click rather than a drag.
+    New { anchor: (f64, f64), previous: Option<Crop> },
     /// Moving the rectangle as it was.
     Move { anchor: (f64, f64), start: Crop },
     /// Pulling one corner of the rectangle as it was.
@@ -287,13 +288,11 @@ pub struct Rewind {
     weight_drag: Option<(f32, f32)>,
     /// The swatches beside the colour button are showing.
     colors_open: bool,
-    /// The part of the capture copied and exported, once applied.
+    /// The part of the capture copied and exported. A rectangle counts as
+    /// soon as it is drawn; there is no separate apply step.
     crop: Option<Crop>,
-    /// Selecting a crop: the rectangle being dragged, and where the press
-    /// began.
-    crop_draft: Option<Crop>,
     crop_drag: Option<CropDrag>,
-    /// Selecting a crop. Drawing is suspended while it is on.
+    /// The crop tool is selected. Drawing is suspended while it is on.
     cropping: bool,
     /// The overlay is playing its exit: 0 is resting, 1 is off-screen.
     exiting: bool,
@@ -370,7 +369,6 @@ impl Rewind {
             weight_drag: None,
             colors_open: false,
             crop: None,
-            crop_draft: None,
             crop_drag: None,
             cropping: false,
             exiting: false,
@@ -451,7 +449,6 @@ impl Rewind {
         self.draw_eraser = false;
         self.cropping = false;
         self.crop = None;
-        self.crop_draft = None;
         self.crop_drag = None;
         self.request_frame(cx);
         self.request_edge_frames(cx);
@@ -853,13 +850,19 @@ impl Rewind {
 
     // MARK: - Cropping
 
-    /// Starts editing the crop. There is no rectangle until one is drawn, and
-    /// an applied crop comes back for moving or resizing.
+    /// Selects the crop tool. An existing crop gets its handles back for
+    /// moving or resizing.
     fn begin_crop(&mut self, cx: &mut Context<Self>) {
         self.cropping = true;
         self.colors_open = false;
         self.crop_drag = None;
-        self.crop_draft = self.crop;
+        cx.notify();
+    }
+
+    /// Back to drawing; the crop stays as it is.
+    fn end_crop(&mut self, cx: &mut Context<Self>) {
+        self.cropping = false;
+        self.crop_drag = None;
         cx.notify();
     }
 
@@ -892,7 +895,7 @@ impl Rewind {
 
     fn crop_down(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
         let (x, y) = self.normalised_point(x, y);
-        if let Some(crop) = self.crop_draft {
+        if let Some(crop) = self.crop {
             if let Some(handle) = self.crop_handle_at(crop, x, y) {
                 self.crop_drag = Some(CropDrag::Resize { handle, start: crop });
                 cx.notify();
@@ -911,8 +914,8 @@ impl Rewind {
                 return;
             }
         }
-        self.crop_drag = Some(CropDrag::New { anchor: (x, y) });
-        self.crop_draft = Some(Crop {
+        self.crop_drag = Some(CropDrag::New { anchor: (x, y), previous: self.crop });
+        self.crop = Some(Crop {
             x,
             y,
             width: 0.0,
@@ -926,8 +929,8 @@ impl Rewind {
             return;
         };
         let (x, y) = self.normalised_point(x, y);
-        self.crop_draft = Some(match drag {
-            CropDrag::New { anchor } => Crop {
+        self.crop = Some(match drag {
+            CropDrag::New { anchor, .. } => Crop {
                 x: anchor.0.min(x),
                 y: anchor.1.min(y),
                 width: (x - anchor.0).abs(),
@@ -975,36 +978,19 @@ impl Rewind {
     /// A press that never moved is not a crop; the rectangle that was there
     /// before it stays.
     fn crop_up(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.crop_drag, Some(CropDrag::New { .. }))
+        if let Some(CropDrag::New { previous, .. }) = self.crop_drag
             && self
-                .crop_draft
+                .crop
                 .is_some_and(|crop| crop.width < MIN_CROP || crop.height < MIN_CROP)
         {
-            self.crop_draft = self.crop;
+            self.crop = previous;
         }
         self.crop_drag = None;
         cx.notify();
     }
 
-    fn apply_crop(&mut self, cx: &mut Context<Self>) {
-        self.crop = self
-            .crop_draft
-            .filter(|crop| crop.width >= MIN_CROP && crop.height >= MIN_CROP);
-        self.cropping = false;
-        self.crop_drag = None;
-        cx.notify();
-    }
-
-    fn cancel_crop(&mut self, cx: &mut Context<Self>) {
-        self.cropping = false;
-        self.crop_drag = None;
-        self.crop_draft = self.crop;
-        cx.notify();
-    }
-
     fn reset_crop(&mut self, cx: &mut Context<Self>) {
         self.crop = None;
-        self.crop_draft = None;
         self.crop_drag = None;
         cx.notify();
     }
@@ -1661,12 +1647,10 @@ impl Rewind {
     /// | ⌘C             | copy the range as a video file         |
     /// | Esc            | close                                  |
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.cropping {
-            match event.keystroke.key.as_str() {
-                "escape" => self.cancel_crop(cx),
-                "enter" => self.apply_crop(cx),
-                _ => return,
-            }
+        // The crop is already in effect, so Escape only puts the tool down;
+        // everything else, Enter included, works as usual.
+        if self.cropping && event.keystroke.key == "escape" {
+            self.end_crop(cx);
             cx.stop_propagation();
             return;
         }
@@ -2023,7 +2007,7 @@ impl Render for Rewind {
                                     ),
                             )
                         })
-                        .when_some(crop_view(self.cropping, self.crop, self.crop_draft), |this, crop| {
+                        .when_some(self.crop, |this, crop| {
                             let x0 = crop.x as f32 * image_width;
                             let y0 = crop.y as f32 * image_height;
                             let w = crop.width as f32 * image_width;
@@ -2181,8 +2165,14 @@ impl Render for Rewind {
 // MARK: - The bar
 
 impl Rewind {
-    /// The Apply / Cancel pill while a crop is being selected.
+    /// The hint while the crop tool is selected. A drawn crop is already in
+    /// effect, so the only action is taking it away.
     fn crop_actions(&self, bar_top: f32, cx: &mut Context<Self>) -> AnyElement {
+        let hint = if self.crop.is_some() {
+            "Drag the crop or its corners · Esc to draw"
+        } else {
+            "Drag over the capture to crop · Esc to draw"
+        };
         div()
             .absolute()
             .left(px(0.0))
@@ -2202,24 +2192,16 @@ impl Rewind {
                             .px(px(6.0))
                             .text_xs()
                             .text_color(rgba(MUTED))
-                            .child("Crop"),
+                            .child(hint),
                     )
-                    .child(label_button("Reset").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, _: &MouseDownEvent, _window, cx| {
-                            view.reset_crop(cx)
-                        }),
-                    ))
-                    .child(secondary_button("Cancel", "Esc", false).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, _: &MouseDownEvent, _window, cx| {
-                            view.cancel_crop(cx)
-                        }),
-                    ))
-                    .child(primary_button("Apply", "Enter", false).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, _: &MouseDownEvent, _window, cx| view.apply_crop(cx)),
-                    )),
+                    .when(self.crop.is_some(), |pill| {
+                        pill.child(label_button("Reset").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                                view.reset_crop(cx)
+                            }),
+                        ))
+                    }),
             )
             .into_any_element()
     }
@@ -2786,13 +2768,6 @@ fn group() -> Div {
         .gap(px(2.0))
 }
 
-/// One pill of the drawing toolbar.
-/// Which rectangle the stage should shade: the one being dragged while
-/// cropping, otherwise the applied crop.
-fn crop_view(cropping: bool, crop: Option<Crop>, draft: Option<Crop>) -> Option<Crop> {
-    if cropping { draft } else { crop }
-}
-
 /// One of the four panes that dim everything outside the crop.
 fn shade_rect(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> Div {
     div()
@@ -2804,6 +2779,7 @@ fn shade_rect(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> Div {
         .bg(color)
 }
 
+/// One pill of the drawing toolbar.
 fn toolbar_pill() -> Div {
     div()
         .w(px(TOOLBAR_WIDTH))
