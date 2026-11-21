@@ -15,6 +15,9 @@ final class MenuController: NSObject, NSMenuDelegate {
     private var cachedDisplays: [DisplayInfo] = []
     private var cachedApplications: [ApplicationInfo] = []
     private var refreshTask: Task<Void, Never>?
+    /// Apps that can be captured change as they launch, quit and come forward;
+    /// the source list must follow them rather than freeze at launch.
+    private var workspaceObservers: [NSObjectProtocol] = []
 
     init(recorder: Recorder, launcher: UILauncher) {
         self.recorder = recorder
@@ -36,6 +39,18 @@ final class MenuController: NSObject, NSMenuDelegate {
         statusItem.menu = menu
 
         reloadSources()
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [
+            NSWorkspace.didLaunchApplicationNotification,
+            NSWorkspace.didTerminateApplicationNotification,
+            NSWorkspace.didActivateApplicationNotification,
+        ] {
+            workspaceObservers.append(
+                center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    self?.reloadSources()
+                }
+            )
+        }
         refreshTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refresh()
@@ -47,6 +62,9 @@ final class MenuController: NSObject, NSMenuDelegate {
     // MARK: - Menu
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        // Pick up anything that changed since the menu was last built; the
+        // cached list is used now and the next open sees the refresh.
+        reloadSources()
         menu.removeAllItems()
 
         menu.addItem(statusRow())
