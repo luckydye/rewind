@@ -1676,9 +1676,10 @@ fn fit(frame_width: f32, frame_height: f32, max_width: f32, max_height: f32) -> 
     if frame_width <= 0.0 || frame_height <= 0.0 {
         return (max_width, max_height);
     }
-    let scale = (max_width / frame_width)
-        .min(max_height / frame_height)
-        .min(1.0);
+    // Always fill the stage, upscaling if the frame is smaller than it: the
+    // playback preview is 1280 wide and the stage is wider, and capping the
+    // scale at 1.0 made the picture shrink as soon as playback started.
+    let scale = (max_width / frame_width).min(max_height / frame_height);
     (frame_width * scale, frame_height * scale)
 }
 
