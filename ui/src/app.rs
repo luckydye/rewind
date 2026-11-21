@@ -3059,7 +3059,13 @@ pub fn run(show: bool) {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
                 title: None,
-                appears_transparent: true,
+                // On Windows a "transparent" titlebar makes GPUI answer
+                // WM_NCCALCSIZE itself and inset the client area by the
+                // resize-frame thickness (8 px left/right/bottom, 1 px top at
+                // 100%), even after the frame styles are stripped: the overlay
+                // drew short of every edge. Left opaque, Windows computes the
+                // client area, and a WS_POPUP window's is the whole window.
+                appears_transparent: !cfg!(windows),
                 traffic_light_position: None,
             }),
             focus: true,
