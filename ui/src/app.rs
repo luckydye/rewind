@@ -178,6 +178,9 @@ pub struct Rewind {
     frame: Option<Arc<RenderImage>>,
     frame_size: (u32, u32),
     requested: Option<f64>,
+    /// Whether the in-flight request asked for a lean (playback or scrub) frame
+    /// rather than the sharp one.
+    requested_lean: bool,
     in_flight: bool,
     drag: Option<Drag>,
     busy: Option<Busy>,
@@ -229,6 +232,7 @@ impl Rewind {
             frame: None,
             frame_size: (16, 9),
             requested: None,
+            requested_lean: false,
             in_flight: false,
             drag: None,
             busy: None,
@@ -683,7 +687,8 @@ impl Rewind {
         self.requested = Some(self.playhead);
         let seconds = self.playhead;
         let anchor = self.anchor;
-        let playing = self.playing;
+        let lean = self.playing || self.drag.is_some();
+        self.requested_lean = lean;
         let client = self.client.clone();
 
         cx.spawn(async move |this, cx| {
@@ -693,7 +698,7 @@ impl Rewind {
                     let mut request = Request::new(Command::PreviewFrame);
                     request.seconds = Some(seconds);
                     request.anchor = anchor;
-                    request.width = Some(if playing {
+                    request.width = Some(if lean {
                         PLAYBACK_WIDTH
                     } else {
                         PREVIEW_WIDTH
@@ -751,6 +756,15 @@ impl Rewind {
                 self.progress = 1.0;
                 self.status = Some(Status::Error(error.to_string()));
             }
+        }
+
+        // Releasing while a lean request is in flight would otherwise leave the
+        // soft scrub frame on screen until the next seek: nothing is stale, so
+        // nothing asks again.
+        let lean = self.playing || self.drag.is_some();
+        if self.requested_lean && !lean {
+            self.request_frame(cx);
+            return;
         }
 
         let stale = self
@@ -1131,7 +1145,8 @@ impl Render for Rewind {
 
         // Nothing else in the overlay is focusable, and the window can lose key
         // status when another app activates itself, which silently drops Space,
-        // Enter and Escape. Re-assert focus on every frame.
+        // Enter and Escape. `focus_until` bounds the retries: re-asserting focus
+        // unconditionally invalidates the window every frame and pins a core.
         if let Some(until) = self.focus_until {
             if self.focus.is_focused(window) || Instant::now() >= until {
                 self.focus_until = None;
@@ -1270,6 +1285,9 @@ impl Render for Rewind {
                 MouseButton::Left,
                 cx.listener(|view, _: &MouseUpEvent, _window, cx| {
                     if view.drag.take().is_some() {
+                        // The drag used the lean frame; restore the sharp one now
+                        // that nothing is moving.
+                        view.request_frame(cx);
                         cx.notify();
                     }
                 }),
