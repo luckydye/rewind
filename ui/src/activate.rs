@@ -52,6 +52,10 @@ fn only_window() -> *mut c_void {
     }
 }
 
+/// AppKit finds the window through `NSApplication.windows`; only the Windows
+/// version needs the handle.
+pub fn remember(_window: &gpui::Window) {}
+
 /// The overlay stays resident between uses, so it must not sit in the Dock
 /// or the app switcher: NSApplicationActivationPolicyAccessory.
 pub fn make_accessory() {

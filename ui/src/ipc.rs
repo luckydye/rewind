@@ -4,8 +4,7 @@
 
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::protocol::{Request, Response};
@@ -64,9 +63,48 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+#[cfg(unix)]
 pub fn default_socket_path() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME is unset");
     PathBuf::from(home).join("Library/Application Support/Rewind/rewindd.sock")
+}
+
+/// Must match `paths::pipe_name` in the Windows daemon.
+#[cfg(windows)]
+pub fn default_socket_path() -> PathBuf {
+    let user: String = std::env::var("USERNAME")
+        .unwrap_or_else(|_| "user".into())
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    PathBuf::from(format!(r"\\.\pipe\rewind-{user}-rewindd"))
+}
+
+#[cfg(unix)]
+fn connect(path: &Path) -> io::Result<impl Read + Write> {
+    let stream = std::os::unix::net::UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(Duration::from_secs(60)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(60)))?;
+    Ok(stream)
+}
+
+/// A named pipe opens like a file. Every instance can be busy for a moment
+/// while the daemon creates the next one, which is retried, not reported.
+#[cfg(windows)]
+fn connect(path: &Path) -> io::Result<impl Read + Write> {
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let started = std::time::Instant::now();
+    loop {
+        match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+            Err(error)
+                if error.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                    && started.elapsed() < Duration::from_secs(5) =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            result => return result,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -82,14 +120,7 @@ impl Client {
     }
 
     pub fn send(&self, request: &Request) -> Result<Reply, Error> {
-        let mut stream =
-            UnixStream::connect(&self.path).map_err(|e| Error::Connect(self.path.clone(), e))?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(60)))
-            .map_err(Error::Io)?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(60)))
-            .map_err(Error::Io)?;
+        let mut stream = connect(&self.path).map_err(|e| Error::Connect(self.path.clone(), e))?;
 
         let payload = serde_json::to_vec(request).map_err(Error::Encode)?;
         let length = u32::try_from(payload.len()).map_err(|_| Error::FrameTooLarge(payload.len()))?;

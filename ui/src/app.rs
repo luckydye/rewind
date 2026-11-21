@@ -1628,9 +1628,10 @@ impl Rewind {
             "space" => self.toggle_play(cx),
             // Enter copies whatever the switch says and dismisses; Escape just
             // dismisses.
-            "enter" if modifiers.platform => self.export(cx),
+            // `secondary` is Cmd on macOS and Ctrl elsewhere.
+            "enter" if modifiers.secondary() => self.export(cx),
             "enter" => self.close(cx),
-            "c" if modifiers.platform => self.copy_clip(cx),
+            "c" if modifiers.secondary() => self.copy_clip(cx),
             "left" if modifiers.alt => self.shift_range(1.0, cx),
             "right" if modifiers.alt => self.shift_range(-1.0, cx),
             "left" => self.nudge(step, cx),
@@ -2471,7 +2472,7 @@ impl Rewind {
             .child(close_switch)
             .child(secondary)
             .child(
-                primary_button("Export", "⌘Enter", self.busy == Some(Busy::Export))
+                primary_button("Export", EXPORT_SHORTCUT, self.busy == Some(Busy::Export))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|view, _: &MouseDownEvent, _window, cx| view.export(cx)),
@@ -2972,34 +2973,29 @@ fn write_overlay(
     Ok(Some(path))
 }
 
+#[cfg(target_os = "macos")]
+const EXPORT_SHORTCUT: &str = "⌘Enter";
+#[cfg(not(target_os = "macos"))]
+const EXPORT_SHORTCUT: &str = "Ctrl+Enter";
+
+#[cfg(target_os = "macos")]
 fn reveal(path: &str) {
     let _ = std::process::Command::new("open")
         .args(["-R", path])
         .spawn();
 }
 
+#[cfg(windows)]
+fn reveal(path: &str) {
+    // `/select,` must be one argument with the path glued on, or Explorer
+    // opens the parent folder without selecting anything.
+    use std::os::windows::process::CommandExt;
+    let _ = std::process::Command::new("explorer")
+        .raw_arg(format!("/select,\"{path}\""))
+        .spawn();
+}
+
 // MARK: - Entry
-
-/// Leaves a stale socket file from a killed overlay behind would block the
-/// bind forever, so it is removed unless something actually answers on it.
-fn bind_listener(path: &std::path::Path) -> Option<std::os::unix::net::UnixListener> {
-    if path.exists() {
-        match std::os::unix::net::UnixStream::connect(path) {
-            Ok(_) => return None,
-            Err(_) => {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
-    std::os::unix::net::UnixListener::bind(path).ok()
-}
-
-fn ui_socket_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").expect("HOME is unset");
-    std::path::PathBuf::from(home)
-        .join("Library/Application Support/Rewind")
-        .join("ui.sock")
-}
 
 /// The overlay stays resident so the hotkey only has to show a window that
 /// already exists. A resident process costs nothing while hidden if no frames
@@ -3013,11 +3009,7 @@ pub fn run(show: bool) {
             .unwrap_or_else(|| Bounds::new(point(px(0.0), px(0.0)), size(px(1440.0), px(900.0))));
         let display_id = display.as_ref().map(|display| display.id());
 
-        let path = ui_socket_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let Some(listener) = bind_listener(&path) else {
+        let Some(listener) = crate::signal::Listener::bind() else {
             // Another overlay is already listening; it will be the one shown.
             cx.quit();
             return;
@@ -3049,6 +3041,9 @@ pub fn run(show: bool) {
             .open_window(options, |_window, cx| cx.new(Rewind::new))
             .expect("could not open the rewind window");
 
+        handle
+            .update(cx, |_, window, _| crate::activate::remember(window))
+            .ok();
         crate::activate::make_borderless();
         crate::activate::make_accessory();
 
@@ -3063,7 +3058,7 @@ pub fn run(show: bool) {
                 let listener = listener.clone();
                 let incoming = cx
                     .background_executor()
-                    .spawn(async move { listener.accept().is_ok() })
+                    .spawn(async move { listener.accept() })
                     .await;
                 if !incoming {
                     break;

@@ -1,9 +1,14 @@
+#[cfg(target_os = "macos")]
+mod activate;
+#[cfg(windows)]
+#[path = "activate_windows.rs"]
 mod activate;
 mod app;
 mod icons;
 mod ipc;
 mod paint;
 mod protocol;
+mod signal;
 
 use std::fs;
 
@@ -63,7 +68,9 @@ fn run_cli(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         Some("preview") => {
             let ago = flag(arguments, "--ago").unwrap_or(2.0);
             let width = flag(arguments, "--width").unwrap_or(0.0) as i64;
-            let out = option(arguments, "--out").unwrap_or_else(|| "/tmp/preview.bgra".into());
+            let out = option(arguments, "--out").unwrap_or_else(|| {
+                std::env::temp_dir().join("preview.bgra").display().to_string()
+            });
 
             let started = std::time::Instant::now();
             let mut request = Request::new(Command::PreviewFrame);

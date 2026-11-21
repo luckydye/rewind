@@ -4330,8 +4330,10 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "image",
+ "raw-window-handle",
  "serde",
  "serde_json",
+ "windows 0.61.3",
 ]
 
 [[package]]

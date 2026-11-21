@@ -335,6 +335,144 @@ rewindd run --seconds 10 --stats 3 --clip 5 --export /tmp/clip.mp4
 | `--stats` | 5 | statistics interval, 0 disables |
 | `--no-cursor` | off | omit the cursor |
 
+## Windows
+
+`win/` is the Windows daemon, written in Rust. It is Rust rather than Swift
+for the opposite of the reason the macOS daemon is Swift: every API it needs
+is reachable from the `windows` crate, and none of the macOS frameworks exist
+on Windows. It speaks the same protocol, so `rewind-ui` is the same overlay
+on both platforms, with a Windows `activate.rs` and a different transport.
+
+```powershell
+.\scripts\windows.ps1 bundle      # dist\Rewind\: Rewind.exe, rewindd.exe, rewindctl.exe, rewind-ui.exe
+.\scripts\windows.ps1 install     # %LOCALAPPDATA%\Programs\Rewind, Start at Login, started
+.\scripts\windows.ps1 uninstall
+```
+
+For development, run `win\target\debug\rewindd.exe` from a terminal: its log
+goes there, and it finds `ui\target\<profile>\rewind-ui.exe` on its own.
+`rewindctl` has the same commands as on macOS, plus `copy`, `copy-frame`,
+`thumbnails` and `preview --out frame.bmp`. `export`, `copy` and
+`copy-frame` take `--overlay <rgba file>` and `--crop x,y,w,h` (fractions),
+so the annotation path can be tested without drawing anything. Without `--out` it only reports timing.
+
+| macOS | Windows |
+|---|---|
+| `SCStream` | Windows.Graphics.Capture: monitor capture into D3D11 textures, no frames while the screen is unchanged |
+| (VideoToolbox takes BGRA) | D3D11 video processor converts BGRA to NV12 and scales for `--height`, on the GPU |
+| VideoToolbox HEVC | Media Foundation hardware H.264 MFT (NVENC / AMF / QuickSync), fed D3D11 textures directly |
+| `FrameRing` | `ring.rs`, same eviction and keyframe cut |
+| `AVAssetWriter` passthrough | `mp4.rs`, a ~250-line single-track MP4 writer; samples are muxed as encoded |
+| `PreviewEngine` (VideoToolbox) | `preview.rs`: Microsoft H.264 decoder MFT, NV12 → BGRA (BT.709) on the CPU, box-filtered when a width is asked for |
+| unix socket, mode 0600 | named pipe `\\.\pipe\rewind-<user>-rewindd`, DACL for the current user only, remote clients rejected |
+| one byte on `ui.sock` | auto-reset named event `Local\Rewind.Overlay.<user>` |
+| menu bar item | notification-area icon: left click opens, right click is the same menu |
+| Carbon hotkey ⌘⇧S | `RegisterHotKey` **Alt+Shift+S** |
+| `SMAppService` login item | `HKCU\…\Run` value pointing at `Rewind.exe` |
+| `NSPasteboard` | `CF_DIB` for Copy Frame, `CF_HDROP` (the file) for Copy Clip |
+| `~/Movies/Rewind`, Caches | `%USERPROFILE%\Videos\Rewind`, `%LOCALAPPDATA%\Rewind\Clipboard` |
+| `config.json` in Application Support | `%APPDATA%\Rewind\config.json` |
+
+There are two daemon executables. `Rewind.exe` is built for the GUI
+subsystem, so Start at Login opens no console window. `rewindd.exe` is the
+console build, used for the CLI and for development.
+
+Decisions worth knowing:
+
+- **Alt+Shift+S, not Ctrl+Shift+S.** Ctrl+Shift+S is Save As in most apps,
+  Win+Shift+S is the Snipping Tool, and Ctrl+Alt is AltGr on many European
+  layouts.
+- **Focus is handed over, not taken.** Windows only lets the foreground
+  process give the foreground away. The daemon is that process right after
+  the hotkey or a tray click, so it calls `AllowSetForegroundWindow` before
+  signalling the overlay. If that races, the overlay attaches its input queue
+  to the foreground thread for one `SetForegroundWindow` call. Hiding the
+  overlay returns activation to the previous app on its own.
+- **The overlay covers its monitor before the first show.** GPUI sizes
+  windows in logical pixels. Above 100% scaling that is smaller than the
+  screen, and the first show happens before the daemon has reported which
+  display is captured.
+- **Thumbnails decode in parallel.** Each thumbnail is an independent
+  keyframe, so each distinct one is decoded once across up to six decoders:
+  250 ms for 24 at 1440p instead of 1.1 s in sequence.
+- **No fade-in.** GPUI composites through DirectComposition, which a
+  layered-window alpha cannot animate, so the overlay simply appears.
+- **Annotations and crops are burnt in on the CPU and re-encoded on the
+  GPU.** Copy Frame composites the overlay's RGBA layer onto the native
+  frame, then crops, as `AnnotationOverlay.swift` and `Crop.swift` do. A clip
+  with either one is decoded frame by frame, with its own decoder so the
+  overlay's preview state is untouched. Each frame is composited and cropped,
+  uploaded to a texture, and sent through the same video processor and
+  hardware H.264 encoder as live capture (`transcode.rs`). The result keeps
+  the capture's codec settings, colour and one-second keyframes. Without
+  annotations or a crop, a clip is still muxed as encoded, with no
+  re-encode.
+
+  Re-encoding at 1440p takes about 20 ms per frame: 2.7 s for a 5 s clip
+  with 159 frames, 1.2 s for 57 frames cropped to 852×720. Every frame in
+  comes out (the low-latency encoder emits one output per input), and the
+  clips decode completely in Chromium.
+
+- **H.264, not HEVC.** Windows decodes HEVC only with the HEVC Video
+  Extensions from the Store, so HEVC clips would not play on many machines,
+  and the preview decoder would fail on them too. `doctor` reports both.
+- **Hardware MFTs are asynchronous.** They request input and announce output
+  through events. An `IMFAsyncCallback` forwards each event into the same
+  channel as captured frames, so the encoder thread blocks on a single
+  `recv()` and never polls.
+- **Keyframes are forced by time, not only by GOP length.** No frames arrive
+  while the screen is idle, so a 30-frame GOP could stretch to minutes. The
+  encoder forces an IDR when a second has passed since the last one, so a clip
+  still starts at most a second early.
+- **The OS limits the frame rate.** `SetMinUpdateInterval` (Windows 11 24H2+)
+  stops the compositor calling back faster than `--fps`. Older builds deliver
+  at the display refresh rate, and the extra frames are skipped in-process.
+- **The capture border is hidden** via `GraphicsCaptureAccess` on Windows 11.
+  Older builds show a yellow border.
+- **The low-latency mode is required.** It produces one output per input with
+  no B-frames, so decode order equals presentation order. The NV12 texture
+  pool relies on that one-to-one output to know when a texture is free again.
+
+Measured on an RTX 3060 Ti at 2560×1440, release build, 20 s per case, with
+a video playing (so not an idle desktop). CPU is the process's share of one
+core:
+
+| case | CPU % | frames | bitrate |
+|---|---|---|---|
+| native 1440p30 | 1.6–3.3 | 556 / 20 s | 8.2 Mbps |
+| 1080p30 | 2.2–3.5 | 561 / 20 s | 4.2 Mbps |
+| 720p15 | 1.2–2.6 | 301 / 20 s | 2.0 Mbps |
+
+No frames were dropped and every captured frame was encoded. A requested 10 s
+clip came out at 10.9 s with 11 keyframes, because the cut lands on the
+previous keyframe. Exported clips decode completely in Chromium (0 corrupted
+frames, seekable), and UI text stays sharp at native resolution.
+
+Preview round trips over the pipe, release build, at 2560×1440:
+
+| | round trip |
+|---|---|
+| scrub forward, 0.1 s steps, 1280 wide | 24–67 ms |
+| same frame repeatedly | 22 ms |
+| native 2560×1440 frame | 186 ms |
+| scrub backward, 1280 wide | 69–79 ms |
+| 24 thumbnails / 64 thumbnails | 250 ms / 356 ms |
+
+While hidden, the resident overlay used 0.016 s of CPU over 10 s, with an
+83 MB working set (GPUI and Direct3D).
+
+Not handled yet:
+
+- Single-application capture. `listApplications` is empty and
+  `applicationBundleID` is ignored; `GraphicsCaptureItem` can capture a
+  window, which is the way in.
+- Picking the encoder by adapter LUID on multi-GPU machines.
+- Exclusive-fullscreen games, which can capture black.
+- Hardware (DXVA) preview decode. The native frame costs 186 ms, mostly
+  software decode plus NV12 → BGRA conversion on the CPU.
+- A change of display resolution rebuilds the whole pipeline, which empties
+  the buffer.
+
 ## Roadmap
 
 - [x] capture → HEVC → keyframe-aligned ring → export
