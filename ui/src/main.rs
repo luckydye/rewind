@@ -1,6 +1,7 @@
 mod activate;
 mod app;
 mod ipc;
+mod paint;
 mod protocol;
 
 use std::fs;

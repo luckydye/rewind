@@ -132,14 +132,32 @@ actor Recorder {
         return try previews.thumbnails(frames: snapshot.frames, indices: indices, width: width)
     }
 
-    func export(from: Double, to: Double, path: String?, anchor: Double? = nil) async throws -> Clip {
+    func export(
+        from: Double,
+        to: Double,
+        path: String?,
+        anchor: Double? = nil,
+        overlayPath: String? = nil
+    ) async throws -> Clip {
         guard let ring, let encoder else { throw RecorderError.notRecording }
         let snapshot = try ring.snapshot(from: from, to: to, anchor: anchor)
         let url = path.map { URL(fileURLWithPath: $0) } ?? Self.newClipURL()
 
-        let result = try await Task.detached {
-            try ClipExporter.write(frames: snapshot.frames, to: url)
-        }.value
+        let result: ExportResult
+        if let overlayPath {
+            let overlay = try AnnotationOverlay.load(overlayPath)
+            result = try await Task.detached {
+                try await ClipExporter.writeAnnotated(
+                    frames: snapshot.frames,
+                    overlay: overlay,
+                    to: url
+                )
+            }.value
+        } else {
+            result = try await Task.detached {
+                try ClipExporter.write(frames: snapshot.frames, to: url)
+            }.value
+        }
 
         return Clip(
             path: result.url.path,

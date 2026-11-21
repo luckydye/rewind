@@ -45,6 +45,9 @@ public struct Request: Codable, Sendable {
     /// when it opens; without it, times are measured from the newest frame,
     /// which keeps moving because capture continues while the overlay is open.
     public var anchor: Double?
+    /// Raw RGBA annotation layer (u32 width, u32 height, then pixels) for the
+    /// daemon to composite into a copied frame or an exported clip.
+    public var overlayPath: String?
 
     public init(
         command: Command,
@@ -54,7 +57,8 @@ public struct Request: Codable, Sendable {
         width: Int? = nil,
         count: Int? = nil,
         range: ClipRange? = nil,
-        anchor: Double? = nil
+        anchor: Double? = nil,
+        overlayPath: String? = nil
     ) {
         self.command = command
         self.config = config
@@ -64,6 +68,7 @@ public struct Request: Codable, Sendable {
         self.count = count
         self.range = range
         self.anchor = anchor
+        self.overlayPath = overlayPath
     }
 }
 

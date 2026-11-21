@@ -112,6 +112,9 @@ pub struct Request {
     pub anchor: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<i64>,
+    /// Raw RGBA annotation layer for the daemon to composite, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlay_path: Option<String>,
 }
 
 impl Request {
@@ -125,6 +128,7 @@ impl Request {
             range: None,
             anchor: None,
             count: None,
+            overlay_path: None,
         }
     }
 }

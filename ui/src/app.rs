@@ -16,6 +16,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::ipc::{self, Client, RawImage, Reply};
+use crate::paint::{Brush, BrushKind, Paint, Point, Rgb, StrokeSession, from_srgb_hex};
 use crate::protocol::{ClipRange, Command, Request};
 
 // MARK: - Geometry
@@ -79,7 +80,18 @@ const THUMBNAIL_COUNT: i64 = 16;
 const THUMBNAIL_WIDTH: i64 = 160;
 const EDGE_FRAME_WIDTH: i64 = 640;
 
+/// The drawing toolbar floats down the left edge, over the capture.
+const TOOLBAR_WIDTH: f32 = 52.0;
+const SWATCH: f32 = 18.0;
+const DEFAULT_BRUSH_WIDTH: f32 = 9.0;
+const MIN_BRUSH_WIDTH: f32 = 1.0;
+const MAX_BRUSH_WIDTH: f32 = 160.0;
 
+/// Ink paints in linear RGB; these are sRGB swatches chosen to stay readable
+/// on both light and dark captures.
+const DRAW_COLORS: [u32; 8] = [
+    0xFFFFFF, 0x16181D, 0xE5484D, 0xF07A24, 0xF5C542, 0x2FA84F, 0x2F7CF6, 0x9A5CF5,
+];
 
 // MARK: - Palette
 
@@ -128,7 +140,11 @@ enum Drag {
     /// Moving the whole selection. The range is moved by the cursor's offset
     /// from where the drag started, applied to the range as it was then, so
     /// its length cannot drift while dragging.
-    Range { anchor: f64, from: f64, to: f64 },
+    Range {
+        anchor: f64,
+        from: f64,
+        to: f64,
+    },
 }
 
 enum Status {
@@ -196,6 +212,23 @@ pub struct Rewind {
     /// Bumped whenever a close starts or the overlay is shown again, so a copy
     /// that finishes late cannot hide an overlay the user has reopened.
     close_generation: u64,
+    /// Drawing mode: strokes are laid with the Ink brush instead of scrubbing.
+    draw_enabled: bool,
+    draw_eraser: bool,
+    brush_color: Rgb,
+    brush_width: f32,
+    /// Completed annotations and the stroke currently under the pointer, in
+    /// normalised capture coordinates so they can render at any size.
+    paint: Paint,
+    live: Option<StrokeSession>,
+    live_started: Option<Instant>,
+    /// The annotations, painted over the preview. Rebuilt when a stroke moves.
+    overlay: Option<Arc<RenderImage>>,
+    /// On-screen rect of the preview, in window coordinates, so a pointer can
+    /// be mapped back onto the capture.
+    stage_image: (f32, f32, f32, f32),
+    /// The capture's encoded size, used to rasterise annotations for export.
+    native_size: (u32, u32),
     /// Remaining attempts to take keyboard focus after showing. Focus has to be
     /// re-asserted from a render, the only place a `Window` is available, but
     /// doing that unconditionally invalidates the window every frame and pins a
@@ -241,6 +274,16 @@ impl Rewind {
             playback_clock: None,
             close_copy: CloseCopy::Image,
             close_generation: 0,
+            draw_enabled: false,
+            draw_eraser: false,
+            brush_color: from_srgb_hex(DRAW_COLORS[2]),
+            brush_width: DEFAULT_BRUSH_WIDTH,
+            paint: Paint::new(),
+            live: None,
+            live_started: None,
+            overlay: None,
+            stage_image: (0.0, 0.0, 1.0, 1.0),
+            native_size: (0, 0),
             last_clip: None,
             focus_until: None,
             closing: false,
@@ -265,11 +308,16 @@ impl Rewind {
             .map(|state| state.config.fps as f64)
             .unwrap_or(30.0)
             .max(1.0);
+        self.native_size = state
+            .map(|state| (state.width.max(0) as u32, state.height.max(0) as u32))
+            .unwrap_or((0, 0));
         self.safe_top = state
             .and_then(|state| state.display.as_ref())
             .map(|display| display.safe_area_top as f32)
             .unwrap_or(0.0);
-        self.screen = state.and_then(|state| state.display.as_ref()).and_then(|display| {
+        self.screen = state
+            .and_then(|state| state.display.as_ref())
+            .and_then(|display| {
             (display.screen_width > 0.0).then_some((
                 display.screen_x,
                 display.screen_y,
@@ -293,6 +341,12 @@ impl Rewind {
         self.drag = None;
         self.closing = false;
         self.copy_failed = false;
+        self.paint.clear();
+        self.live = None;
+        self.live_started = None;
+        self.overlay = None;
+        self.draw_enabled = false;
+        self.draw_eraser = false;
         self.request_frame(cx);
         self.request_edge_frames(cx);
         self.request_estimate(cx);
@@ -518,6 +572,9 @@ impl Rewind {
         if let Some(frame) = self.frame.take() {
             self.graveyard.push(frame);
         }
+        if let Some(overlay) = self.overlay.take() {
+            self.graveyard.push(overlay);
+        }
         for thumbnail in self.thumbnails.drain(..) {
             self.graveyard.push(thumbnail);
         }
@@ -552,6 +609,9 @@ impl Rewind {
     /// Exact size of the encoded frames the range would export, computed by the
     /// daemon from the ring without decoding anything.
     fn estimated_size(&self) -> String {
+        if !self.paint.is_empty() {
+            return " · annotated".into();
+        }
         match self.estimated_bytes {
             Some(bytes) if bytes > 0 => format!(" · ~{:.1} MB", bytes as f64 / 1_048_576.0),
             _ => String::new(),
@@ -561,7 +621,6 @@ impl Rewind {
     fn selection_duration(&self) -> f64 {
         (self.sel_from - self.sel_to).max(0.0)
     }
-
 
     /// The playhead seeks anywhere in the buffer; the range is what is
     /// exported. Clamping the playhead into the range made clicking outside it
@@ -599,7 +658,165 @@ impl Rewind {
         cx.notify();
     }
 
-    // MARK: - Playback
+    // MARK: - Drawing
+
+    fn toggle_draw(&mut self, cx: &mut Context<Self>) {
+        self.draw_enabled = !self.draw_enabled;
+        if !self.draw_enabled {
+            self.finish_stroke(cx);
+        }
+        cx.notify();
+    }
+
+    fn select_eraser(&mut self, eraser: bool, cx: &mut Context<Self>) {
+        self.draw_eraser = eraser;
+        self.draw_enabled = true;
+        cx.notify();
+    }
+
+    fn nudge_brush_width(&mut self, direction: f32, cx: &mut Context<Self>) {
+        let next = if direction > 0.0 {
+            self.brush_width * 1.15 + 1.0
+        } else {
+            self.brush_width / 1.15 - 1.0
+        };
+        self.brush_width = next.clamp(MIN_BRUSH_WIDTH, MAX_BRUSH_WIDTH);
+        cx.notify();
+    }
+
+    fn undo_stroke(&mut self, cx: &mut Context<Self>) {
+        if self.live.take().is_some() {
+            self.live_started = None;
+        } else {
+            self.paint.undo();
+        }
+        self.rebuild_overlay(cx);
+    }
+
+    fn redo_stroke(&mut self, cx: &mut Context<Self>) {
+        if self.live.is_none() {
+            self.paint.redo();
+            self.rebuild_overlay(cx);
+        }
+    }
+
+    /// On-screen size of the annotation layer. Normalised strokes make the
+    /// preview and the native export the same document rendered twice.
+    fn overlay_size(&self) -> (u32, u32) {
+        let (width, height) = if self.native_size.0 > 0 && self.native_size.1 > 0 {
+            self.native_size
+        } else {
+            self.frame_size
+        };
+        let width = width.min(PREVIEW_WIDTH as u32).max(1);
+        let height =
+            ((width as f64 * height.max(1) as f64 / width.max(1) as f64).round() as u32).max(1);
+        (width, height)
+    }
+
+    /// Native size of the capture, which is what the daemon composites against.
+    fn export_size(&self) -> (u32, u32) {
+        if self.native_size.0 > 0 && self.native_size.1 > 0 {
+            self.native_size
+        } else {
+            (self.frame_size.0.max(1), self.frame_size.1.max(1))
+        }
+    }
+
+    fn rebuild_overlay(&mut self, cx: &mut Context<Self>) {
+        if self.paint.is_empty() && self.live.is_none() {
+            if let Some(overlay) = self.overlay.take() {
+                self.graveyard.push(overlay);
+            }
+            cx.notify();
+            return;
+        }
+
+        let (width, height) = self.overlay_size();
+        let pixels = self.paint.render_rgba(width, height, self.live.as_ref());
+        match build_image(RawImage {
+            width,
+            height,
+            pixels,
+        }) {
+            Ok(image) => {
+                if let Some(previous) = self.overlay.replace(image) {
+                    self.graveyard.push(previous);
+                }
+            }
+            Err(message) => self.status = Some(Status::Error(message)),
+        }
+        cx.notify();
+    }
+
+    /// Maps a window-space pointer onto the capture: 0..1 across the frame.
+    fn normalised_point(&self, x: f32, y: f32) -> Option<(f64, f64)> {
+        let (left, top, width, height) = self.stage_image;
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        Some((
+            ((x - left) / width).clamp(0.0, 1.0) as f64,
+            ((y - top) / height).clamp(0.0, 1.0) as f64,
+        ))
+    }
+
+    fn draw_begin(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        if !self.draw_enabled || self.live.is_some() || self.frame.is_none() {
+            return;
+        }
+        let Some((nx, ny)) = self.normalised_point(x, y) else {
+            return;
+        };
+        let stage_width = self.stage_image.2.max(1.0) as f64;
+        let width = (self.brush_width as f64 / stage_width).clamp(
+            MIN_BRUSH_WIDTH as f64 / stage_width,
+            MAX_BRUSH_WIDTH as f64 / stage_width,
+        );
+        let kind = if self.draw_eraser {
+            BrushKind::Eraser
+        } else {
+            BrushKind::Stroke
+        };
+        let mut point = Point::at(nx, ny);
+        point.time = Some(0.0);
+        self.stop_playback();
+        self.live_started = Some(Instant::now());
+        self.live = Some(StrokeSession::new(
+            kind,
+            Brush::ink(width),
+            self.brush_color,
+            point,
+            1.0 / stage_width,
+        ));
+        self.rebuild_overlay(cx);
+    }
+
+    fn draw_move(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        let Some((nx, ny)) = self.normalised_point(x, y) else {
+            return;
+        };
+        let time = self
+            .live_started
+            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
+        let mut point = Point::at(nx, ny);
+        point.time = Some(time);
+        live.push(&[point]);
+        self.rebuild_overlay(cx);
+    }
+
+    fn finish_stroke(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = self.live.take() else {
+            return;
+        };
+        self.live_started = None;
+        self.paint.push(live.finish());
+        self.rebuild_overlay(cx);
+    }
 
     fn stop_playback(&mut self) {
         self.playing = false;
@@ -698,11 +915,7 @@ impl Rewind {
                     let mut request = Request::new(Command::PreviewFrame);
                     request.seconds = Some(seconds);
                     request.anchor = anchor;
-                    request.width = Some(if lean {
-                        PLAYBACK_WIDTH
-                    } else {
-                        PREVIEW_WIDTH
-                    });
+                    request.width = Some(if lean { PLAYBACK_WIDTH } else { PREVIEW_WIDTH });
                     client.send(&request)
                 })
                 .await;
@@ -806,6 +1019,9 @@ impl Rewind {
 
         self.busy = Some(if copy { Busy::Copy } else { Busy::Export });
         self.stop_playback();
+        if self.live.is_some() {
+            self.finish_stroke(cx);
+        }
         self.status = Some(Status::Info("rendering…".into()));
 
         let range = ClipRange {
@@ -814,11 +1030,14 @@ impl Rewind {
         };
         let anchor = self.anchor;
         let client = self.client.clone();
+        let annotations = (!self.paint.is_empty()).then(|| self.paint.clone());
+        let size = self.export_size();
 
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
+                    let overlay = write_overlay(annotations.as_ref(), size)?;
                     let mut request = Request::new(if copy {
                         Command::CopyClip
                     } else {
@@ -826,7 +1045,14 @@ impl Rewind {
                     });
                     request.range = Some(range);
                     request.anchor = anchor;
-                    ipc::call(&client, request)
+                    request.overlay_path = overlay
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned());
+                    let result = ipc::call(&client, request).map_err(|error| error.to_string());
+                    if let Some(path) = overlay {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    result
                 })
                 .await;
 
@@ -882,7 +1108,12 @@ impl Rewind {
     /// Two-finger horizontal scrubbing. Inverted, like scrolling a page: swiping
     /// right pulls the timeline back in time. Mostly vertical swipes are
     /// ignored so resting fingers or a diagonal flick do not seek.
-    fn on_scroll(&mut self, event: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let seconds = match event.delta {
             ScrollDelta::Pixels(delta) => {
                 let x = f32::from(delta.x) as f64;
@@ -939,6 +1170,8 @@ impl Rewind {
 
         // Hide now and copy behind: waiting for the daemon to decode and encode
         // made the overlay sit there for half a second after Escape.
+        let annotations = (!self.paint.is_empty()).then(|| self.paint.clone());
+        let size = self.export_size();
         self.hide(cx);
         let seconds = self.playhead;
         let anchor = self.anchor;
@@ -948,10 +1181,18 @@ impl Rewind {
             let result = cx
                 .background_executor()
                 .spawn(async move {
+                    let overlay = write_overlay(annotations.as_ref(), size)?;
                     let mut request = Request::new(Command::CopyFrame);
                     request.seconds = Some(seconds);
                     request.anchor = anchor;
-                    ipc::call(&client, request)
+                    request.overlay_path = overlay
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned());
+                    let result = ipc::call(&client, request).map_err(|error| error.to_string());
+                    if let Some(path) = overlay {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    result
                 })
                 .await;
 
@@ -960,8 +1201,7 @@ impl Rewind {
                 // reported the next time it opens.
                 if let Err(error) = result {
                     view.copy_failed = true;
-                    view.status =
-                        Some(Status::Error(format!("last copy failed: {error}")));
+                    view.status = Some(Status::Error(format!("last copy failed: {error}")));
                 }
                 cx.notify();
             })
@@ -1023,6 +1263,12 @@ impl Rewind {
             "i" => self.mark_start(cx),
             "o" => self.mark_end(cx),
             "a" => self.reset_range(cx),
+            "b" => self.toggle_draw(cx),
+            "e" => self.select_eraser(true, cx),
+            "[" | "bracketleft" => self.nudge_brush_width(-1.0, cx),
+            "]" | "bracketright" => self.nudge_brush_width(1.0, cx),
+            "z" if modifiers.platform && modifiers.shift => self.redo_stroke(cx),
+            "z" if modifiers.platform => self.undo_stroke(cx),
             _ => return,
         }
         // Reporting the key as handled is what stops AppKit offering it again:
@@ -1155,7 +1401,6 @@ impl Render for Rewind {
             }
         }
 
-
         let viewport = window.viewport_size();
         let width: f32 = viewport.width.into();
         let height: f32 = viewport.height.into();
@@ -1206,8 +1451,9 @@ impl Render for Rewind {
         let bar_draw_top = bar_top + (1.0 - bar_progress) * (BAR_HEIGHT + MARGIN * 2.0);
 
         let span = self.span;
-        let x_for =
-            |seconds: f64| track_left + track_width * (1.0 - (seconds / span).clamp(0.0, 1.0)) as f32;
+        let x_for = |seconds: f64| {
+            track_left + track_width * (1.0 - (seconds / span).clamp(0.0, 1.0)) as f32
+        };
 
         let from_x = x_for(self.sel_from);
         let to_x = x_for(self.sel_to);
@@ -1222,50 +1468,90 @@ impl Render for Rewind {
             _ => None,
         };
         let stage = if let (Some(mode), Some(frames)) = (edge_mode, self.edge_frames.as_ref()) {
-            self.edge_view(mode, frames, stage_left, stage_top, stage_width, stage_height)
+            self.edge_view(
+                mode,
+                frames,
+                stage_left,
+                stage_top,
+                stage_width,
+                stage_height,
+            )
         } else {
             match &self.frame {
-            Some(image) => div()
-                .absolute()
-                .left(px(image_left))
-                .top(px(image_top))
-                .w(px(image_width))
-                .h(px(image_height))
-                .rounded(px(image_radius))
-                .overflow_hidden()
-                .border_1()
-                .border_color(rgba(BORDER))
-                .child(
-                    img(ImageSource::Render(image.clone()))
+                Some(image) => {
+                    self.stage_image = (image_left, image_top, image_width, image_height);
+                    let overlay = self.overlay.clone();
+                    div()
+                        .absolute()
+                        .left(px(image_left))
+                        .top(px(image_top))
                         .w(px(image_width))
-                        .h(px(image_height)),
-                )
-                .into_any_element(),
+                        .h(px(image_height))
+                        .rounded(px(image_radius))
+                        .overflow_hidden()
+                        .border_1()
+                        .border_color(rgba(BORDER))
+                        .child(
+                            img(ImageSource::Render(image.clone()))
+                                .w(px(image_width))
+                                .h(px(image_height)),
+                        )
+                        .when_some(overlay, |this, overlay| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .left(px(0.0))
+                                    .top(px(0.0))
+                                    .w(px(image_width))
+                                    .h(px(image_height))
+                                    .child(
+                                        img(ImageSource::Render(overlay))
+                                            .w(px(image_width))
+                                            .h(px(image_height)),
+                                    ),
+                            )
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, event: &MouseDownEvent, _window, cx| {
+                                view.draw_begin(
+                                    event.position.x.into(),
+                                    event.position.y.into(),
+                                    cx,
+                                )
+                            }),
+                        )
+                        .into_any_element()
+                }
 
-            // Before the first frame there is nothing to animate: draw no panel
-            // at all, so the overlay opens onto the dimmed desktop and the video
-            // grows out of it instead of a grey slab appearing first.
-            None if self.progress < 1.0 => div().into_any_element(),
+                // Before the first frame there is nothing to animate: draw no panel
+                // at all, so the overlay opens onto the dimmed desktop and the video
+                // grows out of it instead of a grey slab appearing first.
+                None if self.progress < 1.0 => div().into_any_element(),
 
-            None => div()
-                .absolute()
-                .left(px(image_left))
-                .top(px(image_top))
-                .w(px(image_width))
-                .h(px(image_height))
-                .rounded(px(image_radius))
-                .bg(rgba(PANEL))
-                .border_1()
-                .border_color(rgba(BORDER))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_sm()
-                .text_color(rgba(MUTED))
-                .child("No frame")
-                .into_any_element(),
+                None => div()
+                    .absolute()
+                    .left(px(image_left))
+                    .top(px(image_top))
+                    .w(px(image_width))
+                    .h(px(image_height))
+                    .rounded(px(image_radius))
+                    .bg(rgba(PANEL))
+                    .border_1()
+                    .border_color(rgba(BORDER))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(rgba(MUTED))
+                    .child("No frame")
+                    .into_any_element(),
             }
         };
+
+        let palette = self
+            .draw_enabled
+            .then(|| self.brush_palette(stage_top, cx));
 
         // Moves and releases are handled on the root, which covers the whole
         // window, so a drag keeps tracking after the pointer leaves the bar.
@@ -1276,14 +1562,29 @@ impl Render for Rewind {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
-            .on_mouse_move(cx.listener(move |view, event: &MouseMoveEvent, _window, cx| {
-                if view.drag.is_some() && event.pressed_button == Some(MouseButton::Left) {
-                    view.timeline_drag(event.position.x.into(), track_origin, track_width, cx)
-                }
-            }))
+            .on_mouse_move(
+                cx.listener(move |view, event: &MouseMoveEvent, _window, cx| {
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        if view.live.is_some() {
+                            view.draw_move(event.position.x.into(), event.position.y.into(), cx);
+                        } else if view.drag.is_some() {
+                            view.timeline_drag(
+                                event.position.x.into(),
+                                track_origin,
+                                track_width,
+                                cx,
+                            );
+                        }
+                    }
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|view, _: &MouseUpEvent, _window, cx| {
+                    if view.live.is_some() {
+                        view.finish_stroke(cx);
+                        return;
+                    }
                     if view.drag.take().is_some() {
                         // The drag used the lean frame; restore the sharp one now
                         // that nothing is moving.
@@ -1293,6 +1594,7 @@ impl Render for Rewind {
                 }),
             )
             .child(stage)
+            .when_some(palette, |this, palette| this.child(palette))
             .child(self.transport_bar(
                 bar_top,
                 bar_draw_top,
@@ -1312,6 +1614,127 @@ impl Render for Rewind {
 // MARK: - The bar
 
 impl Rewind {
+    /// The drawing toolbar, floating down the left edge so it never changes
+    /// the size or position of the capture.
+    fn brush_palette(&self, top: f32, cx: &mut Context<Self>) -> AnyElement {
+        let pen = icon_button("✎")
+            .text_color(rgba(if self.draw_eraser { MUTED } else { TEXT }))
+            .bg(rgba(if self.draw_eraser {
+                0x00000000
+            } else {
+                0xFFFFFF1F
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.select_eraser(false, cx)),
+            );
+        let eraser = icon_button("⌫")
+            .text_color(rgba(if self.draw_eraser { TEXT } else { MUTED }))
+            .bg(rgba(if self.draw_eraser {
+                0xFFFFFF1F
+            } else {
+                0x00000000
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.select_eraser(true, cx)),
+            );
+        let tools = vgroup().child(pen).child(eraser);
+
+        let can_undo = self.live.is_some() || self.paint.can_undo();
+        let can_redo = self.live.is_none() && self.paint.can_redo();
+        let history = vgroup()
+            .child(
+                icon_button("↶")
+                    .text_color(rgba(if can_undo { TEXT } else { MUTED }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                            view.undo_stroke(cx)
+                        }),
+                    ),
+            )
+            .child(
+                icon_button("↷")
+                    .text_color(rgba(if can_redo { TEXT } else { MUTED }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                            view.redo_stroke(cx)
+                        }),
+                    ),
+            );
+
+        let weight = vgroup()
+            .child(icon_button("+").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                    view.nudge_brush_width(1.0, cx)
+                }),
+            ))
+            .child(
+                div()
+                    .h(px(18.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .text_color(rgba(TEXT))
+                    .child(format!("{:.0}", self.brush_width)),
+            )
+            .child(icon_button("−").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                    view.nudge_brush_width(-1.0, cx)
+                }),
+            ));
+
+        let mut colors = div().flex().flex_col().gap(px(4.0));
+        for pair in DRAW_COLORS.chunks(2) {
+            let mut row = div().flex().gap(px(4.0));
+            for hex in pair {
+                let color = from_srgb_hex(*hex);
+                let selected = color == self.brush_color;
+                row = row.child(
+                    div()
+                        .size(px(SWATCH))
+                        .rounded_full()
+                        .bg(rgba(*hex << 8 | 0xFF))
+                        .border_2()
+                        .border_color(rgba(if selected { 0xFFFFFFFF } else { 0xFFFFFF33 }))
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, _: &MouseDownEvent, _window, cx| {
+                                view.brush_color = color;
+                                cx.notify();
+                            }),
+                        ),
+                );
+            }
+            colors = colors.child(row);
+        }
+
+        panel()
+            .absolute()
+            .left(px(MARGIN))
+            .top(px(top))
+            .w(px(TOOLBAR_WIDTH))
+            .p(px(6.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(8.0))
+            .child(tools)
+            .child(rule())
+            .child(history)
+            .child(rule())
+            .child(weight)
+            .child(rule())
+            .child(colors)
+            .into_any_element()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn transport_bar(
         &self,
@@ -1350,6 +1773,19 @@ impl Rewind {
                 cx.listener(|view, _: &MouseDownEvent, _window, cx| view.jump_to_end(cx)),
             ));
 
+        let draw = group().child(
+            icon_button("✎")
+                .bg(rgba(if self.draw_enabled {
+                    0xFFFFFF1F
+                } else {
+                    0x00000000
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _: &MouseDownEvent, _window, cx| view.toggle_draw(cx)),
+                ),
+        );
+
         let mut left = div()
             .absolute()
             .left(px(BAR_PADDING))
@@ -1359,6 +1795,7 @@ impl Rewind {
             .items_center()
             .gap(px(10.0))
             .child(transport)
+            .child(draw)
             .child(
                 div()
                     .text_xs()
@@ -1405,8 +1842,7 @@ impl Rewind {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|view, _: &MouseDownEvent, _window, cx| view.copy_clip(cx)),
-            )
-            ;
+            );
 
         let right = div()
             .absolute()
@@ -1420,11 +1856,10 @@ impl Rewind {
             .child(secondary)
             .child(
                 primary_button("Export", "⌘Enter", self.busy == Some(Busy::Export))
-                            .on_mouse_down(
+                    .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|view, _: &MouseDownEvent, _window, cx| view.export(cx)),
-                    )
-                    ,
+                    ),
             )
             .child(icon_button("✕").on_mouse_down(
                 MouseButton::Left,
@@ -1675,6 +2110,23 @@ fn group() -> Div {
         .gap(px(2.0))
 }
 
+/// The same recessed grouping, stacked for the left-edge toolbar.
+fn vgroup() -> Div {
+    div()
+        .w_full()
+        .p(px(2.0))
+        .rounded(px(CONTROL_RADIUS + 1.0))
+        .bg(rgba(GROUP))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(2.0))
+}
+
+fn rule() -> Div {
+    div().h(px(1.0)).w_full().bg(rgba(BORDER))
+}
+
 fn icon_button(glyph: &'static str) -> Div {
     div()
         .w(px(CONTROL_H))
@@ -1815,6 +2267,35 @@ fn build_image(image: RawImage) -> Result<Arc<RenderImage>, String> {
     Ok(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }
 
+/// Writes the annotations for the daemon to composite: two big-endian u32
+/// dimensions followed by straight RGBA. A file keeps the IPC protocol JSON,
+/// even though a native annotation layer is tens of megabytes.
+fn write_overlay(
+    paint: Option<&Paint>,
+    size: (u32, u32),
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(paint) = paint else {
+        return Ok(None);
+    };
+    let (width, height) = (size.0.max(1), size.1.max(1));
+    let pixels = paint.render_rgba(width, height, None);
+    let path = std::env::temp_dir().join(format!(
+        "rewind-annotations-{}-{}.rgba",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0)
+    ));
+
+    let mut data = Vec::with_capacity(8 + pixels.len());
+    data.extend_from_slice(&width.to_be_bytes());
+    data.extend_from_slice(&height.to_be_bytes());
+    data.extend_from_slice(&pixels);
+    std::fs::write(&path, data).map_err(|error| format!("cannot write annotations: {error}"))?;
+    Ok(Some(path))
+}
+
 fn reveal(path: &str) {
     let _ = std::process::Command::new("open")
         .args(["-R", path])
@@ -1901,16 +2382,18 @@ pub fn run(show: bool) {
                 .ok();
         }
 
-        cx.spawn(async move |cx| loop {
-            let listener = listener.clone();
-            let incoming = cx
-                .background_executor()
-                .spawn(async move { listener.accept().is_ok() })
-                .await;
-            if !incoming {
-                break;
+        cx.spawn(async move |cx| {
+            loop {
+                let listener = listener.clone();
+                let incoming = cx
+                    .background_executor()
+                    .spawn(async move { listener.accept().is_ok() })
+                    .await;
+                if !incoming {
+                    break;
+                }
+                let _ = handle.update(cx, |view, window, cx| view.show(window, cx));
             }
-            let _ = handle.update(cx, |view, window, cx| view.show(window, cx));
         })
         .detach();
     });

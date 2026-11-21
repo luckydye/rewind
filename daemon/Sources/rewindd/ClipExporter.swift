@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreImage
 import CoreMedia
 import Foundation
 
@@ -7,6 +8,7 @@ enum ClipExportError: Error, CustomStringConvertible {
     case missingFormatDescription
     case writerRejectedInput
     case writerFailed(String)
+    case annotationExportFailed(String)
 
     var description: String {
         switch self {
@@ -14,6 +16,8 @@ enum ClipExportError: Error, CustomStringConvertible {
         case .missingFormatDescription: return "clip has no format description"
         case .writerRejectedInput: return "AVAssetWriter rejected the video input"
         case .writerFailed(let message): return "AVAssetWriter failed: \(message)"
+        case .annotationExportFailed(let message):
+            return "could not burn the annotations in: \(message)"
         }
     }
 }
@@ -83,6 +87,60 @@ enum ClipExporter {
             bytes: (attributes[.size] as? Int) ?? 0
         )
         }
+    }
+
+    /// Burns a static annotation layer into the clip. Export with annotations
+    /// has to re-encode, so the untouched clip is muxed first and then passed
+    /// through a Core Image video composition.
+    static func writeAnnotated(
+        frames: [CMSampleBuffer],
+        overlay: AnnotationOverlay,
+        to url: URL
+    ) async throws -> ExportResult {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rewind-unannotated-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+
+        let raw = try write(frames: frames, to: temporary)
+        let asset = AVURLAsset(url: raw.url)
+        let annotation = CIImage(cgImage: try overlay.cgImage())
+
+        let composition = AVMutableVideoComposition(asset: asset) { request in
+            let source = request.sourceImage.clampedToExtent()
+            let scaleX = source.extent.width / annotation.extent.width
+            let scaleY = source.extent.height / annotation.extent.height
+            let scaled = annotation
+                .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+                .composited(over: source)
+                .cropped(to: request.sourceImage.extent)
+            request.finish(with: scaled, context: nil)
+        }
+
+        guard let session = AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPresetHEVCHighestQuality
+        ) else {
+            throw ClipExportError.annotationExportFailed("no HEVC export session")
+        }
+        session.videoComposition = composition
+
+        try? FileManager.default.removeItem(at: url)
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        do {
+            try await session.export(to: url, as: .mp4)
+        } catch {
+            throw ClipExportError.annotationExportFailed(error.localizedDescription)
+        }
+
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return ExportResult(
+            url: url,
+            duration: raw.duration,
+            bytes: (attributes[.size] as? Int) ?? 0
+        )
     }
 
     private final class Feeder {
