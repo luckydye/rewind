@@ -238,6 +238,9 @@ pub struct Rewind {
     /// The swatches beside the colour button are showing.
     colors_open: bool,
     brush_color: Rgb,
+    /// A swatch was picked. Until then the ink follows the system theme, which
+    /// can change while the overlay stays resident.
+    color_chosen: bool,
     brush_width: f32,
     /// Completed annotations and the stroke currently under the pointer, in
     /// normalised capture coordinates so they can render at any size.
@@ -302,7 +305,8 @@ impl Rewind {
             draw_eraser: false,
             weight_drag: None,
             colors_open: false,
-            brush_color: from_srgb_hex(DRAW_COLORS[2]),
+            brush_color: theme_ink(cx.window_appearance()),
+            color_chosen: false,
             brush_width: DEFAULT_BRUSH_WIDTH,
             paint: Paint::new(),
             live: None,
@@ -390,6 +394,9 @@ impl Rewind {
         self.release_images(cx);
         self.progress = 0.0;
         self.close_generation = self.close_generation.wrapping_add(1);
+        if !self.color_chosen {
+            self.brush_color = theme_ink(cx.window_appearance());
+        }
         self.closing = false;
         self.copy_failed = false;
 
@@ -777,7 +784,7 @@ impl Rewind {
         }
 
         let (width, height) = self.overlay_size();
-        let pixels = self.paint.render_rgba(width, height, erasing);
+        let pixels = rgba_to_bgra(self.paint.render_rgba(width, height, erasing));
         match build_image(RawImage {
             width,
             height,
@@ -811,7 +818,7 @@ impl Rewind {
         match build_image(RawImage {
             width: region.width,
             height: region.height,
-            pixels: region.pixels,
+            pixels: rgba_to_bgra(region.pixels),
         }) {
             Ok(image) => {
                 if let Some((previous, _)) = self.live_overlay.replace((image, rect)) {
@@ -1648,7 +1655,10 @@ impl Render for Rewind {
 
         // Centred in the space between the top inset and the transport bar.
         let toolbar_top = stage_top + ((bar_top - GAP - stage_top) - TOOLBAR_HEIGHT).max(0.0) / 2.0;
-        let palette = self.brush_palette(toolbar_top, cx);
+        // Slides in from the left edge on the same timing as the bar rising
+        // from below.
+        let toolbar_left = MARGIN - (1.0 - bar_progress) * (TOOLBAR_WIDTH + MARGIN * 2.0);
+        let palette = self.brush_palette(toolbar_left, toolbar_top, cx);
 
         // Moves and releases are handled on the root, which covers the whole
         // window, so a drag keeps tracking after the pointer leaves the bar.
@@ -1718,7 +1728,7 @@ impl Render for Rewind {
 impl Rewind {
     /// The drawing toolbar: separate pills for the tools, history, weight and
     /// colour, stacked down the left edge.
-    fn brush_palette(&self, top: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn brush_palette(&self, left: f32, top: f32, cx: &mut Context<Self>) -> AnyElement {
         let tools = toolbar_pill()
             .child(
                 tool_button(icons::PEN, !self.draw_eraser, true).on_mouse_down(
@@ -1750,7 +1760,12 @@ impl Rewind {
             ));
 
         let fill = SLIDER_HEIGHT * self.weight_fraction();
+        // Pressed is the drag, not the element's own active state: a drag keeps
+        // going after the pointer leaves the slider.
+        let pressed = self.weight_drag.is_some();
         let slider = div()
+            .id("weight")
+            .group("weight")
             .relative()
             .w(px(TOOL_BUTTON))
             .h(px(SLIDER_HEIGHT))
@@ -1758,7 +1773,8 @@ impl Rewind {
             .overflow_hidden()
             .bg(rgba(SUNKEN))
             .border_1()
-            .border_color(rgba(BORDER))
+            .border_color(rgba(if pressed { 0xFFFFFF47 } else { BORDER }))
+            .when(!pressed, |this| this.hover(|style| style.border_color(rgba(0xFFFFFF29))))
             .cursor(CursorStyle::ResizeUpDown)
             .child(
                 div()
@@ -1774,7 +1790,10 @@ impl Rewind {
                     .when(fill > SLIDER_HEIGHT - CONTROL_RADIUS, |this| {
                         this.rounded_t(px(CONTROL_RADIUS - 1.0))
                     })
-                    .bg(rgba(0x5A5A62FF)),
+                    .bg(rgba(if pressed { 0x7C7C86FF } else { 0x5A5A62FF }))
+                    .when(!pressed, |this| {
+                        this.group_hover("weight", |style| style.bg(rgba(0x6A6A73FF)))
+                    }),
             )
             .child(
                 div()
@@ -1784,23 +1803,9 @@ impl Rewind {
                     .flex()
                     .justify_center()
                     .text_size(rems(0.625))
-                    .text_color(rgba(MUTED))
+                    .text_color(rgba(if pressed { TEXT } else { MUTED }))
+                    .group_hover("weight", |style| style.text_color(rgba(TEXT)))
                     .child(format!("{:.0}", self.brush_width)),
-            )
-            .child(
-                // The brush itself, at its real width up to what fits.
-                div()
-                    .absolute()
-                    .bottom(px(6.0))
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .child(
-                        div()
-                            .size(px(self.brush_width.clamp(3.0, TOOL_BUTTON - 10.0)))
-                            .rounded_full()
-                            .bg(rgba(TEXT)),
-                    ),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -1815,25 +1820,31 @@ impl Rewind {
             .map(|hex| (*hex, from_srgb_hex(*hex)))
             .find(|(_, color)| *color == self.brush_color)
             .expect("the brush colour is one of the swatches");
+        let open = self.colors_open;
         let color = div()
+            .id("color")
+            .group("color")
             .size(px(COLOR_BUTTON))
             .rounded_full()
-            .bg(rgba(PANEL))
+            .bg(rgba(if open { 0x2A2A30FF } else { PANEL }))
             .border_1()
-            .border_color(rgba(BORDER))
+            .border_color(rgba(if open { 0xFFFFFF47 } else { BORDER }))
             .shadow_lg()
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
+            .hover(|style| style.bg(rgba(0x26262BFF)).border_color(rgba(0xFFFFFF29)))
             .child(
                 div()
                     .size(px(COLOR_BUTTON - 2.0 * TOOLBAR_PADDING - 2.0))
                     .rounded_full()
                     .bg(rgba(hex << 8 | 0xFF))
                     .border_1()
-                    .border_color(rgba(0xFFFFFF33)),
+                    .border_color(rgba(if open { 0xFFFFFF80 } else { 0xFFFFFF33 }))
+                    .group_hover("color", |style| style.border_color(rgba(0xFFFFFF80))),
             )
+            .active(|style| style.opacity(0.85))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|view, _: &MouseDownEvent, _window, cx| {
@@ -1844,7 +1855,7 @@ impl Rewind {
 
         let column = div()
             .absolute()
-            .left(px(MARGIN))
+            .left(px(left))
             .top(px(top))
             .w(px(TOOLBAR_WIDTH))
             .flex()
@@ -1867,7 +1878,7 @@ impl Rewind {
         // The swatches open beside the colour button, two rows of four.
         let mut swatches = panel()
             .absolute()
-            .left(px(MARGIN + TOOLBAR_WIDTH + TOOLBAR_GAP))
+            .left(px(left + TOOLBAR_WIDTH + TOOLBAR_GAP))
             .top(px(top + TOOLBAR_HEIGHT - COLOR_BUTTON - 4.0))
             .p(px(TOOLBAR_PADDING + 4.0))
             .rounded(px(TOOLBAR_RADIUS))
@@ -1882,16 +1893,22 @@ impl Rewind {
                 let selected = color == self.brush_color;
                 line = line.child(
                     div()
+                        .id(SharedString::from(format!("swatch-{hex:06x}")))
                         .size(px(SWATCH))
                         .rounded_full()
                         .bg(rgba(*hex << 8 | 0xFF))
                         .border_2()
                         .border_color(rgba(if selected { 0xFFFFFFFF } else { 0xFFFFFF26 }))
                         .cursor_pointer()
+                        .when(!selected, |this| {
+                            this.hover(|style| style.border_color(rgba(0xFFFFFF99)))
+                        })
+                        .active(|style| style.opacity(0.75))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |view, _: &MouseDownEvent, _window, cx| {
                                 view.brush_color = color;
+                                view.color_chosen = true;
                                 view.colors_open = false;
                                 cx.notify();
                             }),
@@ -2444,6 +2461,24 @@ fn fit(frame_width: f32, frame_height: f32, max_width: f32, max_height: f32) -> 
     // scale at 1.0 made the picture shrink as soon as playback started.
     let scale = (max_width / frame_width).min(max_height / frame_height);
     (frame_width * scale, frame_height * scale)
+}
+
+/// The paint engine produces RGBA (which is what the daemon composites for
+/// export); GPUI's `RenderImage` takes BGRA, like the daemon's preview frames.
+fn rgba_to_bgra(mut pixels: Vec<u8>) -> Vec<u8> {
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    pixels
+}
+
+/// Ink that stands out on what the system theme puts on screen: white on a
+/// dark desktop, black on a light one.
+fn theme_ink(appearance: WindowAppearance) -> Rgb {
+    match appearance {
+        WindowAppearance::Dark | WindowAppearance::VibrantDark => from_srgb_hex(DRAW_COLORS[0]),
+        WindowAppearance::Light | WindowAppearance::VibrantLight => from_srgb_hex(DRAW_COLORS[1]),
+    }
 }
 
 fn build_image(image: RawImage) -> Result<Arc<RenderImage>, String> {

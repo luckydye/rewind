@@ -93,18 +93,24 @@ impl StrokeSession {
         self.kind
     }
 
-    /// The stroke as laid so far.
-    pub fn stroke(&self) -> Stroke {
-        Stroke { color: self.color, kind: self.kind, tips: self.tips.clone(), space: self.space }
+    /// The stroke as it would be if the pointer lifted now. The gesture only
+    /// lays a segment once two more readings follow it, so a hand that slows
+    /// and stops before lifting leaves its widest stretch unlaid until release;
+    /// drawing that preview instead makes release change nothing on screen.
+    pub fn preview(&self) -> Stroke {
+        let mut tips = self.tips.clone();
+        self.gesture.clone().commit(&mut Recorder { tips: &mut tips });
+        Stroke { color: self.color, kind: self.kind, tips, space: self.space }
     }
 
-    /// The stroke so far, rasterised for a surface `width` by `height` but
-    /// only over the area it covers, so drawing costs the stroke rather than
-    /// the whole surface. `None` until the gesture has laid a mark.
+    /// The preview, rasterised for a surface `width` by `height` but only over
+    /// the area it covers, so drawing costs the stroke rather than the whole
+    /// surface.
     pub fn render_region(&self, width: u32, height: u32) -> Option<Region> {
+        let stroke = self.preview();
         let scale = (width as f64 / self.space.0, height as f64 / self.space.1);
         let mut bounds: Option<(f64, f64, f64, f64)> = None;
-        for tip in &self.tips {
+        for tip in &stroke.tips {
             let reach = tip.reach * scale.0 + 1.0;
             let (x0, x1) = (tip.start.x.min(tip.end.x) * scale.0, tip.start.x.max(tip.end.x) * scale.0);
             let (y0, y1) = (tip.start.y.min(tip.end.y) * scale.1, tip.start.y.max(tip.end.y) * scale.1);
@@ -125,7 +131,7 @@ impl StrokeSession {
         let target = Target { width: region_width, height: region_height, origin: (x as f64, y as f64), scale };
         let mut layer = vec![0f32; region_width as usize * region_height as usize * 4];
         let mut mask = vec![0f32; region_width as usize * region_height as usize];
-        composite(&mut layer, &mut mask, &target, &self.stroke());
+        composite(&mut layer, &mut mask, &target, &stroke);
         Some(Region { x, y, width: region_width, height: region_height, pixels: to_rgba8(&layer) })
     }
 }
@@ -204,7 +210,7 @@ impl Paint {
     pub fn render_rgba(&self, width: u32, height: u32, live: Option<&StrokeSession>) -> Vec<u8> {
         let mut layer = vec![0f32; width as usize * height as usize * 4];
         let mut mask = vec![0f32; width as usize * height as usize];
-        let live = live.map(StrokeSession::stroke);
+        let live = live.map(StrokeSession::preview);
         for stroke in self.strokes.iter().chain(live.as_ref()) {
             let target = Target {
                 width,
