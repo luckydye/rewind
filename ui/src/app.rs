@@ -275,7 +275,9 @@ impl Rewind {
         });
         self.sel_from = self.span.min(10.0);
         self.sel_to = 0.0;
-        self.playhead = self.sel_from;
+        // Open on the newest frame, not on the start of the default range:
+        // "what just happened" is the frame you want to see first.
+        self.playhead = 0.0;
         self.status = response
             .as_ref()
             .err()
