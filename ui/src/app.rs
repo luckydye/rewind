@@ -274,6 +274,12 @@ pub struct Rewind {
     crop_drag: Option<CropDrag>,
     /// Selecting a crop. Drawing is suspended while it is on.
     cropping: bool,
+    /// The overlay is playing its exit: 0 is resting, 1 is off-screen.
+    exiting: bool,
+    exit_progress: f32,
+    /// Bumped by every show and every dismiss, so a fade that finishes late
+    /// cannot hide an overlay that was reopened.
+    fade_generation: u64,
     brush_color: Rgb,
     /// A swatch was picked. Until then the ink follows the system theme, which
     /// can change while the overlay stays resident.
@@ -346,6 +352,9 @@ impl Rewind {
             crop_draft: None,
             crop_drag: None,
             cropping: false,
+            exiting: false,
+            exit_progress: 0.0,
+            fade_generation: 0,
             brush_color: theme_ink(cx.window_appearance()),
             color_chosen: false,
             brush_width: DEFAULT_BRUSH_WIDTH,
@@ -438,6 +447,9 @@ impl Rewind {
         self.drag = None;
         self.release_images(cx);
         self.progress = 0.0;
+        self.exiting = false;
+        self.exit_progress = 0.0;
+        self.fade_generation = self.fade_generation.wrapping_add(1);
         self.close_generation = self.close_generation.wrapping_add(1);
         if !self.color_chosen {
             self.brush_color = theme_ink(cx.window_appearance());
@@ -666,13 +678,61 @@ impl Rewind {
         }
     }
 
+    /// Dismisses the overlay. The window-server fade is short and subtle, and
+    /// the images are only dropped once it is gone: hiding immediately made
+    /// Escape blink rather than fade.
     fn hide(&mut self, cx: &mut Context<Self>) {
+        if self.exiting {
+            return;
+        }
         self.stop_playback();
-        self.release_images(cx);
-        self.frame = None;
         self.drag = None;
         self.closing = false;
+        self.cropping = false;
+        self.exiting = true;
+        let generation = self.fade_generation.wrapping_add(1);
+        self.fade_generation = generation;
+
+        cx.spawn(async move |this, cx| {
+            const STEPS: u64 = 12;
+            for step in 1..=STEPS {
+                cx.background_executor()
+                    .timer(Duration::from_millis(10))
+                    .await;
+                let still_current = this
+                    .update(cx, |view, cx| {
+                        if view.fade_generation != generation {
+                            return false;
+                        }
+                        view.exit_progress = step as f32 / STEPS as f32;
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !still_current {
+                    return;
+                }
+            }
+            this.update(cx, |view, cx| {
+                if view.fade_generation == generation {
+                    view.finish_hide(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_hide(&mut self, cx: &mut Context<Self>) {
         crate::activate::hide();
+        self.exit_progress = 0.0;
+        self.release_images(cx);
+        self.frame = None;
+        self.overlay = None;
+        self.live_overlay = None;
+        self.live = None;
+        self.exiting = false;
         cx.notify();
     }
 
@@ -1068,7 +1128,7 @@ impl Rewind {
 
     fn draw_begin(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
         self.colors_open = false;
-        if self.live.is_some() || self.frame.is_none() || self.progress < 1.0 {
+        if self.exiting || self.live.is_some() || self.frame.is_none() || self.progress < 1.0 {
             return;
         }
         let (px, py) = self.stage_point(x, y);
@@ -1743,7 +1803,11 @@ impl Render for Rewind {
         // the fitted rect. Both rects keep the frame's aspect, so it is never
         // stretched, only cropped by the window while it is larger than it.
         let eased = 1.0 - (1.0 - self.progress).powi(3);
+        let exit = self.exit_progress;
+        // Cubic ease-in: it leaves gently and then gets out of the way.
+        let exit_ease = exit * exit * exit;
         let scrim_alpha = ((SCRIM_LOADING_ALPHA + (SCRIM_ALPHA - SCRIM_LOADING_ALPHA) * eased)
+            * (1.0 - exit_ease)
             * 255.0)
             .round() as u32;
         let (cover_width, cover_height) =
@@ -1760,9 +1824,27 @@ impl Render for Rewind {
         let image_top = start_top + (end_top - start_top) * eased;
         let image_radius = 14.0 * eased;
 
-        // The bar follows, arriving from below the screen edge.
+        // Exit: the preview settles inward while the furniture slides away.
+        // Geometric rather than a fade, so dismissing reads as the overlay
+        // leaving rather than the screen blinking.
+        let (image_width, image_height, image_left, image_top) = {
+            let zoom = 1.0 - 0.07 * exit_ease;
+            let width = image_width * zoom;
+            let height = image_height * zoom;
+            (
+                width,
+                height,
+                image_left + (image_width - width) / 2.0,
+                image_top + (image_height - height) / 2.0,
+            )
+        };
+
+        // The bar follows, arriving from below the screen edge and leaving the
+        // same way.
         let bar_progress = ((eased - 0.35) / 0.65).clamp(0.0, 1.0);
-        let bar_draw_top = bar_top + (1.0 - bar_progress) * (BAR_HEIGHT + MARGIN * 2.0);
+        let bar_draw_top = bar_top
+            + (1.0 - bar_progress) * (BAR_HEIGHT + MARGIN * 2.0)
+            + exit_ease * (BAR_HEIGHT + MARGIN * 2.0);
 
         let span = self.span;
         let x_for = |seconds: f64| {
@@ -1812,6 +1894,9 @@ impl Render for Rewind {
                         .overflow_hidden()
                         .border_1()
                         .border_color(rgba(BORDER))
+                        // A little fade with the zoom: the capture recedes
+                        // rather than blinking out.
+                        .opacity(1.0 - 0.5 * exit_ease)
                         .child(
                             img(ImageSource::Render(image.clone()))
                                 .object_fit(ObjectFit::Fill)
@@ -1929,7 +2014,9 @@ impl Render for Rewind {
         let toolbar_top = stage_top + ((bar_top - GAP - stage_top) - TOOLBAR_HEIGHT).max(0.0) / 2.0;
         // Slides in from the left edge on the same timing as the bar rising
         // from below.
-        let toolbar_left = MARGIN - (1.0 - bar_progress) * (TOOLBAR_WIDTH + MARGIN * 2.0);
+        let toolbar_left = MARGIN
+            - (1.0 - bar_progress) * (TOOLBAR_WIDTH + MARGIN * 2.0)
+            - exit_ease * (TOOLBAR_WIDTH + MARGIN * 2.0);
         let palette = self.brush_palette(toolbar_left, toolbar_top, cx);
         let crop_pill = self.cropping.then(|| self.crop_actions(bar_top, cx));
 
@@ -2369,9 +2456,9 @@ impl Rewind {
                         cx.listener(|view, _: &MouseDownEvent, _window, cx| view.export(cx)),
                     ),
             )
-            .child(icon_button("✕").on_mouse_down(
+            .child(icon_button("✕").on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.hide(cx)),
+                cx.listener(|view, _: &MouseUpEvent, _window, cx| view.hide(cx)),
             ));
 
         let block_top = ROW_Y + BLOCK_INSET;
