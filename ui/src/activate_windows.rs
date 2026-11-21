@@ -113,6 +113,42 @@ pub fn place(x: f64, y: f64, width: f64, height: f64) {
     }
 }
 
+/// Brings the hidden window back as a small card at the top centre of the
+/// monitor it was covering, without taking the foreground: the app in front
+/// keeps its keys while a render finishes. `WS_EX_NOACTIVATE` keeps a click on
+/// the card from activating it either. Sizes are in points.
+pub fn show_toast(_screen: Option<(f64, f64, f64, f64)>, width: f64, height: f64, top: f64, scale: f64) {
+    let Some(hwnd) = hwnd() else { return };
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 | WS_EX_NOACTIVATE.0;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex as isize);
+
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return;
+        }
+        let area = info.rcMonitor;
+        let (w, h) = ((width * scale).round() as i32, (height * scale).round() as i32);
+        let x = area.left + (area.right - area.left - w) / 2;
+        let y = area.top + (top * scale).round() as i32;
+
+        // Cloaked until the card has been drawn at its new size.
+        prepare_fade();
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+}
+
+/// The window is about to be the overlay again, which must take focus.
+pub fn end_toast() {
+    let Some(hwnd) = hwnd() else { return };
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & !WS_EX_NOACTIVATE.0;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex as isize);
+    }
+}
+
 pub fn activate() {
     let Some(hwnd) = hwnd() else { return };
     unsafe {

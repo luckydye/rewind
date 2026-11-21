@@ -265,6 +265,10 @@ pub struct State {
     pub on_battery: bool,
     pub last_error: Option<String>,
     pub newest_timestamp: Option<f64>,
+    /// 0 to 1 while a clip export is rendering, so the overlay can show how far
+    /// along a render it is no longer waiting on is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_progress: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

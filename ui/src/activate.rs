@@ -158,6 +158,36 @@ pub fn place(x: f64, y: f64, width: f64, height: f64) {
     }
 }
 
+/// Brings the hidden window back as a small card at the top centre of the
+/// captured display without activating the app, so the app in front keeps
+/// its keys while a render finishes. Sizes are in points; `screen` is the
+/// display's AppKit frame, and without it there is nowhere to put the card.
+pub fn show_toast(screen: Option<(f64, f64, f64, f64)>, width: f64, height: f64, top: f64, _scale: f64) {
+    let Some((x, y, screen_width, screen_height)) = screen else { return };
+    unsafe {
+        let unhide: SendPointer = std::mem::transmute(objc_msgSend as *const ());
+        unhide(
+            shared_application(),
+            selector(c"unhideWithoutActivation"),
+            std::ptr::null_mut(),
+        );
+        // Clear of the menu bar, which the overlay's window level sits above.
+        const MENU_BAR: f64 = 24.0;
+        prepare_fade();
+        place(
+            x + (screen_width - width) / 2.0,
+            y + screen_height - MENU_BAR - top - height,
+            width,
+            height,
+        );
+        let order: SendPointer = std::mem::transmute(objc_msgSend as *const ());
+        order(only_window(), selector(c"orderFrontRegardless"), std::ptr::null_mut());
+    }
+}
+
+/// AppKit needs nothing undone: `activate` takes focus as usual.
+pub fn end_toast() {}
+
 /// Cross-fades the window in. AppKit animates `alphaValue` in the window
 /// server, so this costs no frames in our render loop — driving it from a step
 /// task inside GPUI meant the overlay was painted once and then left at

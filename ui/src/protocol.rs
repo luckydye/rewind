@@ -188,6 +188,10 @@ pub struct State {
     pub last_error: Option<String>,
     #[serde(default)]
     pub newest_timestamp: Option<f64>,
+    /// 0 to 1 while a clip export is rendering. Only the Windows daemon
+    /// reports it so far.
+    #[serde(default)]
+    pub export_progress: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

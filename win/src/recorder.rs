@@ -47,6 +47,29 @@ pub struct Recorder {
     prefetch: Sender<Prefetch>,
     /// Requests waiting for the decoder; the prefetch worker yields to them.
     waiting: Arc<AtomicUsize>,
+    /// How far the export in progress is, 0 to 1; reported with the state.
+    /// Its own lock, so the render never holds `inner`.
+    export_progress: Mutex<Option<f64>>,
+}
+
+/// Clears the reported progress however the export ends, errors included.
+struct ProgressGuard<'a>(&'a Mutex<Option<f64>>);
+
+impl ProgressGuard<'_> {
+    fn new(progress: &Mutex<Option<f64>>) -> ProgressGuard<'_> {
+        *progress.lock().unwrap() = Some(0.0);
+        ProgressGuard(progress)
+    }
+
+    fn report(&self, done: usize, total: usize) {
+        *self.0.lock().unwrap() = Some(done as f64 / total.max(1) as f64);
+    }
+}
+
+impl Drop for ProgressGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() = None;
+    }
 }
 
 /// Frames decoded ahead of playback. A keyframe takes the software decoder
@@ -91,6 +114,7 @@ impl Recorder {
             ahead,
             prefetch,
             waiting,
+            export_progress: Mutex::new(None),
         })
     }
 
@@ -167,7 +191,9 @@ impl Recorder {
     }
 
     pub fn state(&self) -> State {
-        Self::state_of(&self.inner.lock().unwrap())
+        let mut state = Self::state_of(&self.inner.lock().unwrap());
+        state.export_progress = *self.export_progress.lock().unwrap();
+        state
     }
 
     fn state_of(inner: &Inner) -> State {
@@ -192,6 +218,7 @@ impl Recorder {
             on_battery: on_battery(),
             last_error: inner.last_error.clone(),
             newest_timestamp: stats.and_then(|s| s.newest),
+            export_progress: None,
         }
     }
 
@@ -225,10 +252,11 @@ impl Recorder {
         let frozen = self.freeze(from, to, anchor)?;
         let path = path.unwrap_or_else(|| paths::clips_dir().join(paths::timestamped_clip_name(options.format.extension())));
         let overlay = overlay_path.map(Overlay::load).transpose()?;
+        let progress = ProgressGuard::new(&self.export_progress);
 
         if options.format == ExportFormat::Gif {
             let overlay = overlay.map(|o| o.fitted(frozen.size.0, frozen.size.1));
-            let size = write_gif(&frozen, overlay.as_ref(), crop, options, &path)?;
+            let size = write_gif(&frozen, overlay.as_ref(), crop, options, &path, &progress)?;
             return Ok(Clip {
                 bytes: file_size(&path)?,
                 path: path.display().to_string(),
@@ -242,7 +270,7 @@ impl Recorder {
         let (snapshot, size) = if overlay.is_some() || crop.is_some() {
             let overlay = overlay.map(|o| o.fitted(frozen.size.0, frozen.size.1));
             let size = crop.map(|c| c.pixels(frozen.size.0, frozen.size.1)).map(|(_, _, w, h)| (w, h)).unwrap_or(frozen.size);
-            (compose(&frozen, overlay.as_ref(), crop, size)?, size)
+            (compose(&frozen, overlay.as_ref(), crop, size, &progress)?, size)
         } else {
             (frozen.snapshot, frozen.size)
         };
@@ -471,13 +499,15 @@ fn prefetch_worker(
 /// Decodes the range in order (one decode per frame), burns in the drawing,
 /// crops, and re-encodes. A decoder of its own, so the overlay's preview
 /// state is left alone.
-fn compose(frozen: &Frozen, overlay: Option<&Overlay>, crop: Option<&Crop>, size: (u32, u32)) -> Result<Snapshot, String> {
+fn compose(frozen: &Frozen, overlay: Option<&Overlay>, crop: Option<&Crop>, size: (u32, u32), progress: &ProgressGuard) -> Result<Snapshot, String> {
     let mut decoder = PreviewEngine::default();
     let mut encoder = Reencoder::new(size, frozen.fps)?;
+    let total = frozen.snapshot.packets.len();
     for (index, packet) in frozen.snapshot.packets.iter().enumerate() {
         let frame = decoder.frame(&frozen.snapshot, index, 0, frozen.size)?;
         let frame = annotation::apply(frame, overlay, crop);
         encoder.push(&frame, packet.pts)?;
+        progress.report(index + 1, total);
     }
     let output = encoder.finish()?;
     // One frame out per frame in is the low-latency encoder's contract.
@@ -490,13 +520,23 @@ fn compose(frozen: &Frozen, overlay: Option<&Overlay>, crop: Option<&Crop>, size
 /// Decodes the frames the GIF timeline keeps (the decoder steps through the
 /// ones in between), burns in the drawing, crops, and hands each to WIC.
 /// Returns the GIF's pixel size.
-fn write_gif(frozen: &Frozen, overlay: Option<&Overlay>, crop: Option<&Crop>, options: ExportOptions, path: &Path) -> Result<(u32, u32), String> {
+fn write_gif(
+    frozen: &Frozen,
+    overlay: Option<&Overlay>,
+    crop: Option<&Crop>,
+    options: ExportOptions,
+    path: &Path,
+    progress: &ProgressGuard,
+) -> Result<(u32, u32), String> {
     let times: Vec<f64> = frozen.snapshot.packets.iter().map(|p| ring::seconds(p.pts)).collect();
     let mut decoder = PreviewEngine::default();
     let mut gif = GifWriter::create(path, options.gif_max_width)?;
-    for frame in image_file::gif_timeline(&times, options.gif_fps) {
+    let timeline = image_file::gif_timeline(&times, options.gif_fps);
+    let total = timeline.len();
+    for (done, frame) in timeline.into_iter().enumerate() {
         let image = decoder.frame(&frozen.snapshot, frame.index, 0, frozen.size)?;
         gif.push(&annotation::apply(image, overlay, crop), frame.delay)?;
+        progress.report(done + 1, total);
     }
     let size = gif.size;
     gif.finish()?;

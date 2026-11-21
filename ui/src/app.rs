@@ -194,6 +194,24 @@ enum Status {
     Error(String),
 }
 
+/// Copy and Export close the overlay at once and render behind it; the same
+/// window comes back as this small card at the top of the screen until the
+/// render has finished and been reported.
+struct Toast {
+    text: String,
+    error: bool,
+    /// The saved file, revealed when the toast is clicked.
+    path: Option<String>,
+}
+
+const TOAST_WIDTH: f32 = 340.0;
+const TOAST_HEIGHT: f32 = 52.0;
+/// Below the top edge, and below the menu bar on macOS.
+const TOAST_TOP: f32 = 12.0;
+const TOAST_DONE: Duration = Duration::from_millis(3000);
+const TOAST_FAILED: Duration = Duration::from_millis(7000);
+const PROGRESS_POLL: Duration = Duration::from_millis(150);
+
 pub struct Rewind {
     focus: FocusHandle,
     client: Client,
@@ -254,9 +272,20 @@ pub struct Rewind {
     /// The settings file could not be read or written. Shown each time the
     /// overlay opens until a save succeeds.
     settings_error: Option<String>,
-    /// Bumped whenever a close starts or the overlay is shown again, so a copy
-    /// that finishes late cannot hide an overlay the user has reopened.
-    close_generation: u64,
+    /// The background render's card, while it renders and briefly after.
+    toast: Option<Toast>,
+    /// The window is currently the toast rather than the overlay.
+    toast_shown: bool,
+    /// Bumped by every render and every show, so a dismiss scheduled for an
+    /// earlier toast cannot take down a newer one or the reopened overlay.
+    toast_generation: u64,
+    /// How far the background render is, when the daemon reports it.
+    render_progress: Option<f32>,
+    /// The overlay is up, or opening: not hidden, not exiting. A render that
+    /// finishes while it is reports in the bar instead of a toast.
+    overlay_open: bool,
+    /// The window's scale at the last render, to size the toast in pixels.
+    scale: f32,
     /// Which drawing tool is selected; the toolbar is always available.
     draw_eraser: bool,
     /// The weight slider is being dragged: the pointer's window-space y when
@@ -346,7 +375,12 @@ impl Rewind {
             ticker: None,
             playback_clock: None,
             output: remembered.output,
-            close_generation: 0,
+            toast: None,
+            toast_shown: false,
+            toast_generation: 0,
+            render_progress: None,
+            overlay_open: false,
+            scale: 1.0,
             draw_eraser: false,
             weight_drag: None,
             colors_open: false,
@@ -451,7 +485,16 @@ impl Rewind {
         self.exiting = false;
         self.exit_progress = 0.0;
         self.fade_generation = self.fade_generation.wrapping_add(1);
-        self.close_generation = self.close_generation.wrapping_add(1);
+        // The toast's window becomes the overlay again; a render still running
+        // reports in the bar instead.
+        self.toast_generation = self.toast_generation.wrapping_add(1);
+        self.toast = None;
+        let was_toast = self.toast_shown;
+        if was_toast {
+            self.toast_shown = false;
+            crate::activate::end_toast();
+        }
+        self.overlay_open = true;
         if !self.color_chosen {
             self.brush_color = theme_ink(cx.window_appearance());
         }
@@ -459,7 +502,11 @@ impl Rewind {
         self.copy_failed = false;
 
         // Open on the display actually being captured, not always the primary.
-        if let Some((x, y, width, height)) = self.screen {
+        // Coming from the toast the size changes, and GPUI only hears of that
+        // outside an update (see `show_toast`).
+        if was_toast {
+            self.restore_overlay_size(cx);
+        } else if let Some((x, y, width, height)) = self.screen {
             crate::activate::place(x, y, width, height);
         }
         window.focus(&self.focus);
@@ -470,6 +517,9 @@ impl Rewind {
         crate::activate::activate();
 
         self.refresh(cx);
+        if self.busy.is_some() && self.status.is_none() {
+            self.status = Some(Status::Info(self.rendering_text()));
+        }
         // Activation races window ordering and is often dropped. Re-asserting it
         // is not enough on its own: the focus retry lives in `render`, which only
         // runs when something asks for a frame, so nudge a few renders too and
@@ -503,8 +553,6 @@ impl Rewind {
         // Full bleed until the first frame arrives; `received` starts the morph
         // so it never animates a placeholder.
         self.progress = 0.0;
-        // A close may still be copying; make sure it cannot hide this show.
-        self.close_generation = self.close_generation.wrapping_add(1);
         self.closing = false;
         self.copy_failed = false;
     }
@@ -702,6 +750,7 @@ impl Rewind {
         self.closing = false;
         self.cropping = false;
         self.exiting = true;
+        self.overlay_open = false;
         let generation = self.fade_generation.wrapping_add(1);
         self.fade_generation = generation;
 
@@ -745,7 +794,140 @@ impl Rewind {
         self.live_overlay = None;
         self.live = None;
         self.exiting = false;
+        if self.toast.is_some() && !self.overlay_open {
+            self.show_toast(cx);
+        }
         cx.notify();
+    }
+
+    // MARK: - Toast
+
+    /// Brings the hidden window back as the toast: small, at the top centre of
+    /// the captured display, and never taking focus from the app in front.
+    ///
+    /// Every resize of the window happens in a task, between updates. GPUI
+    /// learns of a new size by updating the window from the platform's resize
+    /// callback, and that update fails while the window is already being
+    /// updated, so a resize made from inside one is lost: the toast was drawn
+    /// with the full-screen viewport, its contents far below the visible card.
+    fn show_toast(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let Some((screen, scale)) = this
+                .update(cx, |view, _| {
+                    (view.toast.is_some() && !view.overlay_open && !view.toast_shown).then(|| {
+                        view.toast_shown = true;
+                        (view.screen, view.scale)
+                    })
+                })
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
+            crate::activate::show_toast(
+                screen,
+                TOAST_WIDTH as f64,
+                TOAST_HEIGHT as f64,
+                TOAST_TOP as f64,
+                scale as f64,
+            );
+            // Same reveal as the overlay: nothing on screen until the toast
+            // itself has been drawn, so the last overlay frame never flashes.
+            this.update(cx, |_, cx| {
+                crate::activate::start_fade();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn dismiss_toast(&mut self, cx: &mut Context<Self>) {
+        self.toast = None;
+        if self.toast_shown {
+            self.toast_shown = false;
+            crate::activate::hide();
+            crate::activate::end_toast();
+            // Back to covering the display while hidden, so the next show
+            // opens at full size; outside an update, as in `show_toast`.
+            self.restore_overlay_size(cx);
+        }
+        cx.notify();
+    }
+
+    fn restore_overlay_size(&self, cx: &mut Context<Self>) {
+        let screen = self.screen;
+        cx.spawn(async move |_, _| match screen {
+            Some((x, y, width, height)) => crate::activate::place(x, y, width, height),
+            None => crate::activate::make_borderless(),
+        })
+        .detach();
+    }
+
+    fn dismiss_toast_after(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        let generation = self.toast_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |view, cx| {
+                if view.toast_generation == generation && view.busy.is_none() {
+                    view.dismiss_toast(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks the daemon how far the render is until it has finished. The
+    /// render's own request is blocked for its whole length, so this is a
+    /// second connection; the daemon serves each on its own thread.
+    fn poll_progress(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(PROGRESS_POLL).await;
+                let busy = this.update(cx, |view, _| view.busy.is_some()).unwrap_or(false);
+                if !busy {
+                    return;
+                }
+                let client = client.clone();
+                let progress = cx
+                    .background_executor()
+                    .spawn(async move {
+                        ipc::call(&client, Request::new(Command::Status))
+                            .ok()
+                            .and_then(|response| response.state)
+                            .and_then(|state| state.export_progress)
+                    })
+                    .await;
+                let still = this
+                    .update(cx, |view, cx| {
+                        if view.busy.is_none() {
+                            return false;
+                        }
+                        if let Some(progress) = progress {
+                            view.render_progress = Some(progress.clamp(0.0, 1.0) as f32);
+                            if view.overlay_open {
+                                view.status = Some(Status::Info(view.rendering_text()));
+                            }
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !still {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn rendering_text(&self) -> String {
+        match self.render_progress {
+            Some(progress) => format!("rendering… {:.0}%", progress * 100.0),
+            None => "rendering…".into(),
+        }
     }
 
     // MARK: - Timing
@@ -1399,13 +1581,13 @@ impl Rewind {
     /// Export to ~/Movies/Rewind, or with `copy` render to the cache and put
     /// the file on the clipboard. Both are the same render on the daemon side.
     /// Exporting with Image selected saves the frame under the playhead.
+    ///
+    /// The overlay closes at once and the render runs behind it, reported by
+    /// a toast: waiting in the overlay for a re-encode could take seconds.
     fn render_clip(&mut self, copy: bool, cx: &mut Context<Self>) {
-        self.render_clip_then(copy, false, cx);
-    }
-
-    fn render_clip_then(&mut self, copy: bool, close_after: bool, cx: &mut Context<Self>) {
-        let generation = self.close_generation;
         if self.busy.is_some() {
+            self.status = Some(Status::Info("still rendering the last one…".into()));
+            cx.notify();
             return;
         }
         let frame = !copy && self.output == Output::Image;
@@ -1420,7 +1602,6 @@ impl Rewind {
         if self.live.is_some() {
             self.finish_stroke(cx);
         }
-        self.status = Some(Status::Info("rendering…".into()));
 
         let range = ClipRange {
             from: self.sel_from,
@@ -1433,6 +1614,24 @@ impl Rewind {
         let annotations = (!self.paint.is_empty()).then(|| self.paint.clone());
         let size = self.export_size();
         let crop = self.crop;
+
+        let kind = if frame {
+            "PNG"
+        } else if format == ExportFormat::Gif {
+            "GIF"
+        } else {
+            "clip"
+        };
+        self.render_progress = None;
+        self.toast_generation = self.toast_generation.wrapping_add(1);
+        self.toast = Some(Toast {
+            text: format!("{} {kind}…", if copy { "Copying" } else { "Saving" }),
+            error: false,
+            path: None,
+        });
+        self.status = None;
+        self.hide(cx);
+        self.poll_progress(cx);
 
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -1467,54 +1666,57 @@ impl Rewind {
 
             this.update(cx, |view, cx| {
                 view.busy = None;
-                if close_after {
-                    match &result {
-                        Ok(_) => {
-                            if view.close_generation == generation {
-                                view.hide(cx);
-                            }
-                            return;
-                        }
-                        Err(error) => {
-                            view.closing = false;
-                            view.copy_failed = true;
-                            view.status = Some(Status::Error(format!(
-                                "copy failed: {error} — close again to dismiss"
-                            )));
-                            cx.notify();
-                            return;
-                        }
-                    }
-                }
-                let kind = if format == ExportFormat::Gif { "GIF" } else { "clip" };
-                view.status = Some(match result {
+                view.render_progress = None;
+                let (text, error, path) = match result {
                     Ok(response) => match response.clip {
-                        Some(clip) if copy => Status::Info(format!(
-                            "Copied {:.1}s {kind} · {:.1} MB",
-                            clip.duration,
-                            clip.bytes as f64 / 1_048_576.0
-                        )),
-                        Some(clip) if frame => {
-                            view.last_clip = Some(clip.path);
-                            Status::Info(format!(
+                        Some(clip) if copy => (
+                            format!(
+                                "Copied {:.1}s {kind} · {:.1} MB",
+                                clip.duration,
+                                clip.bytes as f64 / 1_048_576.0
+                            ),
+                            false,
+                            None,
+                        ),
+                        Some(clip) if frame => (
+                            format!(
                                 "Saved {}×{} PNG · {:.1} MB",
                                 clip.width,
                                 clip.height,
                                 clip.bytes as f64 / 1_048_576.0
-                            ))
-                        }
-                        Some(clip) => {
-                            view.last_clip = Some(clip.path);
-                            Status::Info(format!(
+                            ),
+                            false,
+                            Some(clip.path),
+                        ),
+                        Some(clip) => (
+                            format!(
                                 "Saved {:.1}s {kind} · {:.1} MB",
                                 clip.duration,
                                 clip.bytes as f64 / 1_048_576.0
-                            ))
-                        }
-                        None => Status::Error("no clip was returned".into()),
+                            ),
+                            false,
+                            Some(clip.path),
+                        ),
+                        None => ("no clip was returned".into(), true, None),
                     },
-                    Err(error) => Status::Error(error.to_string()),
-                });
+                    Err(error) => (
+                        format!("{} failed: {error}", if copy { "Copy" } else { "Export" }),
+                        true,
+                        None,
+                    ),
+                };
+                if let Some(path) = &path {
+                    view.last_clip = Some(path.clone());
+                }
+                if view.overlay_open {
+                    // Reopened while rendering: report in the bar, as the
+                    // overlay always has.
+                    view.toast = None;
+                    view.status = Some(if error { Status::Error(text) } else { Status::Info(text) });
+                } else {
+                    view.toast = Some(Toast { text, error, path });
+                    view.dismiss_toast_after(if error { TOAST_FAILED } else { TOAST_DONE }, cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -1561,8 +1763,9 @@ impl Rewind {
 
     // MARK: - Close
 
-    /// Closing copies the frame under the playhead to the clipboard at native
-    /// resolution, then exits once the daemon confirms.
+    /// Closing copies what the Image / MP4 / GIF switch says: the frame under
+    /// the playhead at native resolution, or the range as a clip rendered
+    /// behind a toast. The overlay hides at once either way.
     fn close(&mut self, cx: &mut Context<Self>) {
         if self.copy_failed {
             self.hide(cx);
@@ -1571,21 +1774,14 @@ impl Rewind {
         if self.closing {
             return;
         }
-
-        self.closing = true;
-        self.close_generation = self.close_generation.wrapping_add(1);
         self.stop_playback();
 
+        // A clip copies in the background behind a toast, like Export.
         if self.output != Output::Image {
-            if self.selection_duration() < 0.05 {
-                self.closing = false;
-                self.status = Some(Status::Error("select at least a moment".into()));
-                cx.notify();
-                return;
-            }
-            self.render_clip_then(true, true, cx);
+            self.render_clip(true, cx);
             return;
         }
+        self.closing = true;
 
         // Hide now and copy behind: waiting for the daemon to decode and encode
         // made the overlay sit there for half a second after Escape.
@@ -1831,6 +2027,11 @@ impl Render for Rewind {
                 window.refresh();
             });
             window.request_animation_frame();
+        }
+
+        self.scale = window.scale_factor();
+        if self.toast_shown {
+            return self.toast_view(cx);
         }
 
         // Nothing else in the overlay is focusable, and the window can lose key
@@ -2164,12 +2365,89 @@ impl Render for Rewind {
                 playhead_x,
                 cx,
             ))
+            .into_any_element()
     }
 }
 
 // MARK: - The bar
 
 impl Rewind {
+    /// The whole window while a render runs behind the closed overlay: what is
+    /// being made, how far along it is, then the result. A saved file is
+    /// revealed by clicking; any click dismisses.
+    fn toast_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(toast) = &self.toast else {
+            return div().into_any_element();
+        };
+        let busy = self.busy.is_some();
+        let detail = if busy {
+            self.render_progress
+                .map(|progress| format!("{:.0}%", progress * 100.0))
+                .unwrap_or_default()
+        } else if toast.path.is_some() {
+            "Reveal".to_string()
+        } else {
+            String::new()
+        };
+        let progress = self.render_progress.filter(|_| busy);
+
+        panel()
+            .size_full()
+            .px(px(16.0))
+            .flex()
+            .flex_col()
+            .justify_center()
+            .gap(px(7.0))
+            .when(!busy, |this| this.cursor_pointer())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_sm()
+                            .text_color(rgba(if toast.error { DANGER } else { TEXT }))
+                            .child(toast.text.clone()),
+                    )
+                    .child(div().text_xs().text_color(rgba(MUTED)).child(detail)),
+            )
+            .when_some(progress, |this, progress| {
+                this.child(
+                    div()
+                        .w_full()
+                        .h(px(3.0))
+                        .rounded_full()
+                        .bg(rgba(GROUP))
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative(progress))
+                                .rounded_full()
+                                .bg(rgba(ACCENT)),
+                        ),
+                )
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                    if view.busy.is_some() {
+                        return;
+                    }
+                    if let Some(path) = view.toast.as_ref().and_then(|toast| toast.path.clone()) {
+                        reveal(&path);
+                    }
+                    view.dismiss_toast(cx);
+                }),
+            )
+            .into_any_element()
+    }
+
     /// The hint while the crop tool is selected. A drawn crop is already in
     /// effect, so the only action is taking it away.
     fn crop_actions(&self, bar_top: f32, cx: &mut Context<Self>) -> AnyElement {
