@@ -138,6 +138,9 @@ pub struct Rewind {
     anchor: Option<f64>,
     /// Capture frame rate, so frame stepping lands on real frames.
     fps: f64,
+    /// Average bitrate of the rolling buffer, for estimating an export's size
+    /// before rendering it.
+    bitrate: f64,
     /// Entrance progress: 0 is a full-bleed preview with the bar off-screen,
     /// 1 is the resting layout.
     progress: f32,
@@ -197,6 +200,7 @@ impl Rewind {
             span: 1.0,
             anchor: None,
             fps: 30.0,
+            bitrate: 0.0,
             progress: 1.0,
             safe_top: 0.0,
             graveyard: Vec::new(),
@@ -244,6 +248,7 @@ impl Rewind {
             .map(|state| state.config.fps as f64)
             .unwrap_or(30.0)
             .max(1.0);
+        self.bitrate = state.map(|state| state.bitrate).unwrap_or(0.0);
         self.safe_top = state
             .and_then(|state| state.display.as_ref())
             .map(|display| display.safe_area_top as f32)
@@ -474,6 +479,16 @@ impl Rewind {
     fn x_of(&self, seconds_ago: f64, left: f32, width: f32) -> f32 {
         let fraction = 1.0 - (seconds_ago / self.span).clamp(0.0, 1.0);
         left + width * fraction as f32
+    }
+
+    /// Rough size of the selected range at the buffer's average bitrate. Exports
+    /// cut on keyframes, so the clip is usually a hair longer than selected.
+    fn estimated_size(&self) -> String {
+        if self.bitrate <= 0.0 {
+            return String::new();
+        }
+        let bytes = self.selection_duration() * self.bitrate / 8.0;
+        format!(" · ~{:.1} MB", bytes / 1_048_576.0)
     }
 
     fn selection_duration(&self) -> f64 {
@@ -1257,7 +1272,11 @@ impl Rewind {
                 div()
                     .text_xs()
                     .text_color(rgba(MUTED))
-                    .child(format!("{:.1}s selected", self.selection_duration())),
+                    .child(format!(
+                        "{:.1}s selected{}",
+                        self.selection_duration(),
+                        self.estimated_size()
+                    )),
             );
         if !status_text.is_empty() {
             left = left.child(div().text_xs().text_color(status_colour).child(status_text));
