@@ -462,11 +462,11 @@ impl Rewind {
             crate::activate::place(x, y, width, height);
         }
         window.focus(&self.focus);
-        // Fade at the window-server level so it costs no frames here: the
-        // overlay is transparent, ordered front, then animated to opaque.
+        // Stay transparent until the first real frame lands. The window keeps
+        // its last drawn surface while hidden, so starting the fade here showed
+        // one frame of the previous overlay before the new one was drawn.
         crate::activate::prepare_fade();
         crate::activate::activate();
-        crate::activate::start_fade();
 
         self.refresh(cx);
         // Activation races window ordering and is often dropped. Re-asserting it
@@ -632,6 +632,15 @@ impl Rewind {
 
     /// Bounded step task that drives the entrance geometry: eighteen frames,
     /// then it stops. GPUI's `with_animation` never advanced here.
+    /// A frame never arrived: show the resting layout and its error rather
+    /// than leaving an invisible window up.
+    fn reveal_without_frame(&mut self) {
+        if self.progress == 0.0 {
+            self.progress = 1.0;
+            crate::activate::start_fade();
+        }
+    }
+
     fn animate_in(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             for step in 1..=MORPH_STEPS {
@@ -694,10 +703,10 @@ impl Rewind {
         self.fade_generation = generation;
 
         cx.spawn(async move |this, cx| {
-            const STEPS: u64 = 12;
+            const STEPS: u64 = 10;
             for step in 1..=STEPS {
                 cx.background_executor()
-                    .timer(Duration::from_millis(10))
+                    .timer(Duration::from_millis(8))
                     .await;
                 let still_current = this
                     .update(cx, |view, cx| {
@@ -1300,6 +1309,7 @@ impl Rewind {
                         // The entrance animates real content, so it starts when
                         // the first frame lands rather than on the placeholder.
                         if self.progress == 0.0 {
+                            crate::activate::start_fade();
                             self.animate_in(cx);
                         }
                         // The strip is a full second of decoding on the daemon's
@@ -1309,11 +1319,15 @@ impl Rewind {
                             self.fetch_thumbnails(cx);
                         }
                     }
-                    Err(message) => self.status = Some(Status::Error(message)),
+                    Err(message) => {
+                        self.status = Some(Status::Error(message));
+                        self.reveal_without_frame();
+                    }
                 }
             }
             Ok(Reply::Images(_)) => {
                 self.status = Some(Status::Error("expected a frame".into()));
+                self.reveal_without_frame();
             }
             Ok(Reply::Json(response)) => {
                 self.status = Some(Status::Error(
@@ -1321,11 +1335,12 @@ impl Rewind {
                         .error
                         .unwrap_or_else(|| "the daemon sent no frame".into()),
                 ));
+                self.reveal_without_frame();
             }
             Err(error) => {
                 // Nothing to animate into; settle into the resting layout.
-                self.progress = 1.0;
                 self.status = Some(Status::Error(error.to_string()));
+                self.reveal_without_frame();
             }
         }
 
