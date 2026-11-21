@@ -1315,6 +1315,14 @@ impl Rewind {
         if !status_text.is_empty() {
             left = left.child(div().text_xs().text_color(status_colour).child(status_text));
         }
+        if let Some(path) = &self.last_clip {
+            let path = path.clone();
+            left = left.child(
+                label_button("Reveal").on_mouse_down(MouseButton::Left, move |_, _, _| {
+                    reveal(&path)
+                }),
+            );
+        }
 
         let close_switch = group()
             .child(
@@ -1336,22 +1344,10 @@ impl Rewind {
                 ),
             );
 
-        let mut secondary = group();
-        if let Some(path) = &self.last_clip {
-            let path = path.clone();
-            secondary = secondary.child(
-                label_button("Reveal").on_mouse_down(MouseButton::Left, move |_, _, _| reveal(&path)),
-            );
-        }
-        secondary = secondary
-            .child(label_button("Reset").on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.reset_range(cx)),
-            ))
-            .child(label_button("Copy").on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.copy_clip(cx)),
-            ));
+        let secondary = group().child(label_button("Copy").on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|view, _: &MouseDownEvent, _window, cx| view.copy_clip(cx)),
+        ));
 
         let right = div()
             .absolute()
