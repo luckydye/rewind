@@ -69,6 +69,9 @@ const MORPH_STEPS: u64 = 18;
 /// costs ~11 MB and about 40 ms round trip, which keeps scrubbing usable; the
 /// exported clip is full resolution either way.
 const PREVIEW_WIDTH: i64 = 2048;
+/// While playing, motion hides softness and the frame is the dominant cost:
+/// 1280 wide is 3.7 MB against 9.4 MB, so playback moves ~2.5x less data.
+const PLAYBACK_WIDTH: i64 = 1280;
 
 /// The timeline strip: one thumbnail per slot, decoded from keyframes.
 const THUMBNAIL_COUNT: i64 = 16;
@@ -523,6 +526,8 @@ impl Rewind {
     fn toggle_play(&mut self, cx: &mut Context<Self>) {
         if self.playing {
             self.stop_playback();
+            // The paused frame should be the sharp one.
+            self.request_frame(cx);
             cx.notify();
             return;
         }
@@ -598,6 +603,7 @@ impl Rewind {
         self.requested = Some(self.playhead);
         let seconds = self.playhead;
         let anchor = self.anchor;
+        let playing = self.playing;
         let client = self.client.clone();
 
         cx.spawn(async move |this, cx| {
@@ -607,7 +613,11 @@ impl Rewind {
                     let mut request = Request::new(Command::PreviewFrame);
                     request.seconds = Some(seconds);
                     request.anchor = anchor;
-                    request.width = Some(PREVIEW_WIDTH);
+                    request.width = Some(if playing {
+                        PLAYBACK_WIDTH
+                    } else {
+                        PREVIEW_WIDTH
+                    });
                     client.send(&request)
                 })
                 .await;
