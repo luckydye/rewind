@@ -112,7 +112,12 @@ const DRAW_COLORS: [u32; 8] = [
 
 // MARK: - Palette
 
-const SCRIM: u32 = 0x08080CB8;
+/// The backdrop's colour, without alpha: its darkness follows the entrance.
+const SCRIM: u32 = 0x08080C;
+/// While the first frame loads the desktop is only lightly dimmed; it deepens
+/// as the preview grows into place.
+const SCRIM_LOADING_ALPHA: f32 = 0.28;
+const SCRIM_ALPHA: f32 = 0.72;
 const PANEL: u32 = 0x1B1B1EF5;
 const SUNKEN: u32 = 0x0D0D0FFF;
 const BORDER: u32 = 0xFFFFFF12;
@@ -1511,6 +1516,9 @@ impl Render for Rewind {
         // the fitted rect. Both rects keep the frame's aspect, so it is never
         // stretched, only cropped by the window while it is larger than it.
         let eased = 1.0 - (1.0 - self.progress).powi(3);
+        let scrim_alpha = ((SCRIM_LOADING_ALPHA + (SCRIM_ALPHA - SCRIM_LOADING_ALPHA) * eased)
+            * 255.0)
+            .round() as u32;
         let (cover_width, cover_height) =
             cover(frame_width as f32, frame_height as f32, width, height);
 
@@ -1665,7 +1673,7 @@ impl Render for Rewind {
         div()
             .relative()
             .size_full()
-            .bg(rgba(SCRIM))
+            .bg(rgba(SCRIM << 8 | scrim_alpha))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
