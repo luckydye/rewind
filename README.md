@@ -146,11 +146,13 @@ rewindctl status
 rewindctl status --json
 rewindctl start | stop | quit
 rewindctl export --seconds 30 --out ~/Desktop/clip.mp4
+rewindctl export --seconds 10 --format gif [--gif-fps 15] [--gif-width 1280]
+rewindctl export --format png --at 2.5        # the frame 2.5 s ago
 rewindctl config --fps 30 --buffer 60 --display 0 --app com.apple.Safari
 rewindctl displays | apps
 ```
 
-Clips default to `~/Movies/Rewind/`.
+Clips, GIFs and PNGs default to `~/Movies/Rewind/`.
 
 ## The overlay
 
@@ -184,8 +186,9 @@ inside the overlay as status pills and a side panel, which was decoration.
 | [ / ] | thinner / thicker brush |
 | ⌘Z | undo the last stroke |
 | ⇧⌘Z | redo |
-| Return | copy per the "Enter copies" switch, then close |
-| ⌘C / Copy | copy the range to the clipboard as a video file |
+| Return / Copy | copy per the Image / MP4 / GIF switch, then close |
+| ⌘Return / Export | save per the switch: the frame as PNG, or the range |
+| ⌘C | copy the range to the clipboard as a file (GIF if selected, else MP4) |
 | Escape | close without copying |
 
 The overlay is preloaded hidden when the daemon starts and stays resident, so
@@ -238,6 +241,23 @@ Known gaps: dragging a clip out to Finder needs `NSFilePromiseProvider`, which
 GPUI cannot reach; the overlay covers the primary display only; and a range
 export can start up to a second early because it cuts on the previous keyframe.
 
+### Export formats
+
+One switch in the bar, Image / MP4 / GIF, decides what both Copy and Export
+produce, so there is a single idea of "the output" rather than one per button.
+
+- **Image** — the frame under the playhead, native resolution, PNG.
+- **MP4** — the range, muxed as encoded; re-encoded only when annotated or
+  cropped.
+- **GIF** — the range, decoded, drawn on, cropped, scaled to at most 1280 px
+  wide and sampled at 15 fps. Capture is variable-rate (an unchanged screen
+  produces no frames), so instead of resampling on a fixed clock the first
+  frame in each 1/15 s slot is kept and held until the next one; a mostly idle
+  screen makes a small GIF. Full rate at native size would be hundreds of
+  megabytes; crop first when detail matters. Quantisation is the platform's:
+  ImageIO on macOS, WIC (median-cut palette per frame, no dithering) on
+  Windows.
+
 ### Protocol
 
 Unix socket at `~/Library/Application Support/Rewind/rewindd.sock`, mode 0600.
@@ -261,7 +281,12 @@ daemon in a half-written state.
 ```
 
 Commands: `status`, `start`, `stop`, `setConfig`, `exportClip`,
-`listDisplays`, `listApplications`, `previewFrame`, `openUI`, `quit`.
+`exportFrame`, `copyClip`, `copyFrame`, `listDisplays`, `listApplications`,
+`previewFrame`, `openUI`, `quit`.
+
+`exportClip` and `copyClip` take `"format": "mp4" | "gif"` (default `mp4`);
+for GIF, `fps` (default 15) and `width`, the maximum width (default 1280).
+`exportFrame` writes the frame `seconds` ago as PNG.
 
 `exportClip` takes a range measured in seconds before now:
 

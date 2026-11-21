@@ -13,6 +13,7 @@ pub mod d3d;
 pub mod daemon;
 pub mod encoder;
 pub mod h264;
+pub mod image_file;
 pub mod launcher;
 pub mod login;
 pub mod mp4;

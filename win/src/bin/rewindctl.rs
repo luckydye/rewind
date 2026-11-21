@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use rewindd::protocol::{ClipRange, Command, Crop, Reply, Request, Response};
+use rewindd::protocol::{ClipRange, Command, Crop, ExportFormat, Reply, Request, Response};
 use rewindd::server;
 
 const USAGE: &str = "\
@@ -13,7 +13,9 @@ USAGE:
   rewindctl status [--json]
   rewindctl start | stop | quit | open
   rewindctl export [--seconds N | --from A --to B] [--out PATH] [--overlay RGBA] [--crop x,y,w,h]
+                   [--format mp4 | gif | png] [--gif-fps N] [--gif-width PX] [--at SECONDS]
   rewindctl copy [--seconds N | --from A --to B] [--overlay RGBA] [--crop x,y,w,h]
+                 [--format mp4 | gif] [--gif-fps N] [--gif-width PX]
   rewindctl copy-frame [--ago SECONDS] [--overlay RGBA] [--crop x,y,w,h]
   rewindctl config [--buffer S] [--fps N] [--height PX] [--display N] [--bitrate B] [--cursor on|off]
   rewindctl preview [--ago SECONDS] [--width PX] [--out frame.bmp]
@@ -100,8 +102,26 @@ fn run(args: &[String]) -> Result<(), String> {
             println!("copied the frame");
         }
         Some(command @ ("export" | "copy")) => {
-            let mut request = Request::new(if command == "export" { Command::ExportClip } else { Command::CopyClip });
-            request.range = Some(range(args)?);
+            let format = option(args, "--format").unwrap_or_else(|| "mp4".into());
+            let frame = format == "png";
+            let mut request = Request::new(match (command, frame) {
+                ("export", true) => Command::ExportFrame,
+                ("export", false) => Command::ExportClip,
+                (_, true) => return Err("copy a frame with copy-frame".into()),
+                (_, false) => Command::CopyClip,
+            });
+            if frame {
+                request.seconds = Some(number(args, "--at")?.unwrap_or(0.0));
+            } else {
+                request.range = Some(range(args)?);
+                request.format = Some(match format.as_str() {
+                    "mp4" => ExportFormat::Mp4,
+                    "gif" => ExportFormat::Gif,
+                    _ => return Err("--format must be mp4, gif or png".into()),
+                });
+                request.fps = number(args, "--gif-fps")?;
+                request.width = number(args, "--gif-width")?;
+            }
             request.path = option(args, "--out");
             request.overlay_path = option(args, "--overlay");
             request.crop = crop(args)?;

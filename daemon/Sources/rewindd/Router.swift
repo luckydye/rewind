@@ -27,29 +27,26 @@ enum Router {
                 guard range.to >= 0, range.duration > 0 else {
                     return .json(.failure("range needs from > to >= 0"))
                 }
-                let clip = try await recorder.export(
-                    from: range.from,
-                    to: range.to,
-                    path: request.path,
-                    anchor: request.anchor,
-                    overlayPath: request.overlayPath,
-                    crop: request.crop
-                )
+                let clip = try await export(range: range, path: request.path, request, recorder: recorder)
                 return .json(Response(ok: true, state: await recorder.state(), clip: clip))
 
             case .copyClip:
                 guard let range = request.range, range.to >= 0, range.duration > 0 else {
                     return .json(.failure("copyClip needs a range with from > to >= 0"))
                 }
-                let clip = try await recorder.export(
-                    from: range.from,
-                    to: range.to,
-                    path: Clipboard.newCachedClipURL().path,
+                let path = Clipboard.newCachedClipURL(format: request.format ?? .mp4).path
+                let clip = try await export(range: range, path: path, request, recorder: recorder)
+                try await Clipboard.copyFile(URL(fileURLWithPath: clip.path))
+                return .json(Response(ok: true, state: await recorder.state(), clip: clip))
+
+            case .exportFrame:
+                let clip = try await recorder.exportFrame(
+                    secondsAgo: request.seconds ?? 0,
+                    path: request.path,
                     anchor: request.anchor,
                     overlayPath: request.overlayPath,
                     crop: request.crop
                 )
-                try await Clipboard.copyFile(URL(fileURLWithPath: clip.path))
                 return .json(Response(ok: true, state: await recorder.state(), clip: clip))
 
             case .openUI:
@@ -100,17 +97,12 @@ enum Router {
 
             case .copyFrame:
                 // Native resolution regardless of what the overlay previews at.
-                var image = try await recorder.preview(
+                let image = try await recorder.composedFrame(
                     secondsAgo: request.seconds ?? 0,
-                    width: 0,
-                    anchor: request.anchor
+                    anchor: request.anchor,
+                    overlayPath: request.overlayPath,
+                    crop: request.crop
                 )
-                if let overlayPath = request.overlayPath {
-                    image = try AnnotationOverlay.load(overlayPath).composite(image)
-                }
-                if let crop = request.crop {
-                    image = try image.cropped(to: crop)
-                }
                 try await Clipboard.copy(image)
                 return .json(Response(ok: true))
 
@@ -124,5 +116,25 @@ enum Router {
         } catch {
             return .json(.failure("\(error)"))
         }
+    }
+
+    /// `exportClip` and `copyClip` differ only in where the file goes.
+    static func export(
+        range: ClipRange,
+        path: String?,
+        _ request: Request,
+        recorder: Recorder
+    ) async throws -> Clip {
+        try await recorder.export(
+            from: range.from,
+            to: range.to,
+            path: path,
+            format: request.format ?? .mp4,
+            gifFps: request.fps ?? GifDefaults.fps,
+            gifMaxWidth: request.width ?? GifDefaults.maxWidth,
+            anchor: request.anchor,
+            overlayPath: request.overlayPath,
+            crop: request.crop
+        )
     }
 }

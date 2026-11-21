@@ -27,6 +27,8 @@ struct ExportResult {
     let url: URL
     let duration: TimeInterval
     let bytes: Int
+    let width: Int
+    let height: Int
 }
 
 /// Muxes already-encoded samples into an MP4 without touching the encoder.
@@ -82,10 +84,13 @@ enum ClipExporter {
         }
 
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let dimensions = CMVideoFormatDescriptionGetDimensions(format)
         return ExportResult(
             url: url,
             duration: last.presentationTimeStamp.seconds - first.presentationTimeStamp.seconds,
-            bytes: (attributes[.size] as? Int) ?? 0
+            bytes: (attributes[.size] as? Int) ?? 0,
+            width: Int(dimensions.width),
+            height: Int(dimensions.height)
         )
         }
     }
@@ -108,31 +113,10 @@ enum ClipExporter {
         let annotation = try overlay.map { CIImage(cgImage: try $0.cgImage()) }
 
         let composition = AVMutableVideoComposition(asset: asset) { request in
-            let source = request.sourceImage
-            var image = source
-            if let annotation {
-                let scaleX = source.extent.width / annotation.extent.width
-                let scaleY = source.extent.height / annotation.extent.height
-                image = annotation
-                    .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
-                    .composited(over: source)
-                    .cropped(to: source.extent)
-            }
-            if let crop {
-                // Core Image's origin is bottom-left; the crop is measured from
-                // the top, like the pointer that drew it.
-                let rect = crop.pixels(width: Int(source.extent.width), height: Int(source.extent.height))
-                let inImage = CGRect(
-                    x: rect.origin.x,
-                    y: source.extent.height - rect.maxY,
-                    width: rect.width,
-                    height: rect.height
-                )
-                image = image
-                    .cropped(to: inImage)
-                    .transformed(by: CGAffineTransform(translationX: -inImage.minX, y: -inImage.minY))
-            }
-            request.finish(with: image, context: nil)
+            request.finish(
+                with: compose(request.sourceImage, annotation: annotation, crop: crop),
+                context: nil
+            )
         }
         if let crop {
             let rect = crop.pixels(
@@ -182,8 +166,39 @@ enum ClipExporter {
         return ExportResult(
             url: url,
             duration: raw.duration,
-            bytes: (attributes[.size] as? Int) ?? 0
+            bytes: (attributes[.size] as? Int) ?? 0,
+            width: Int(composition.renderSize.width),
+            height: Int(composition.renderSize.height)
         )
+    }
+
+    /// Annotations first, then the crop: the drawing is in full-frame
+    /// coordinates. The result's origin is at zero.
+    static func compose(_ source: CIImage, annotation: CIImage?, crop: Crop?) -> CIImage {
+        var image = source
+        if let annotation {
+            let scaleX = source.extent.width / annotation.extent.width
+            let scaleY = source.extent.height / annotation.extent.height
+            image = annotation
+                .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+                .composited(over: source)
+                .cropped(to: source.extent)
+        }
+        if let crop {
+            // Core Image's origin is bottom-left; the crop is measured from
+            // the top, like the pointer that drew it.
+            let rect = crop.pixels(width: Int(source.extent.width), height: Int(source.extent.height))
+            let inImage = CGRect(
+                x: rect.origin.x,
+                y: source.extent.height - rect.maxY,
+                width: rect.width,
+                height: rect.height
+            )
+            image = image
+                .cropped(to: inImage)
+                .transformed(by: CGAffineTransform(translationX: -inImage.minX, y: -inImage.minY))
+        }
+        return image
     }
 
     private final class Feeder {

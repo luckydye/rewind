@@ -119,17 +119,17 @@ pub fn copy_file(path: &Path) -> Result<(), String> {
 /// Copied clips live outside `Videos\Rewind`: they exist only to be pasted.
 /// The file has to outlive the copy for the paste to work, so copies older
 /// than a day are removed here rather than right away.
-pub fn new_cached_clip_path() -> PathBuf {
+pub fn new_cached_clip_path(extension: &str) -> PathBuf {
     let dir = paths::clipboard_dir();
     let _ = std::fs::create_dir_all(&dir);
     let cutoff = SystemTime::now() - Duration::from_secs(24 * 60 * 60);
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < cutoff);
-            if old && entry.path().extension().is_some_and(|e| e == "mp4") {
+            if old && entry.path().extension().is_some_and(|e| e == "mp4" || e == "gif") {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
     }
-    dir.join(paths::timestamped_clip_name())
+    dir.join(paths::timestamped_clip_name(extension))
 }

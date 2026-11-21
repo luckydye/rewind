@@ -97,6 +97,7 @@ pub enum Command {
     Stop,
     SetConfig,
     ExportClip,
+    ExportFrame,
     ListDisplays,
     ListApplications,
     PreviewFrame,
@@ -150,6 +151,37 @@ impl Crop {
     }
 }
 
+/// What `exportClip` and `copyClip` write. `exportFrame` always writes PNG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    #[default]
+    Mp4,
+    Gif,
+}
+
+impl ExportFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportFormat::Mp4 => "mp4",
+            ExportFormat::Gif => "gif",
+        }
+    }
+}
+
+/// GIFs are sampled down from the capture: full rate and native size make
+/// files of hundreds of megabytes that nothing will play smoothly.
+pub const GIF_FPS: f64 = 15.0;
+pub const GIF_MAX_WIDTH: u32 = 1280;
+
+/// How a clip is written: the format, and for GIF the rate and maximum width.
+#[derive(Debug, Clone, Copy)]
+pub struct ExportOptions {
+    pub format: ExportFormat,
+    pub gif_fps: f64,
+    pub gif_max_width: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
@@ -175,9 +207,27 @@ pub struct Request {
     /// The part of the capture to keep, if it was cropped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop: Option<Crop>,
+    /// Clip format; MP4 when absent. For GIF, `width` is the maximum width.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ExportFormat>,
+    /// GIF frame rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f64>,
 }
 
 impl Request {
+    pub fn export_options(&self) -> Result<ExportOptions, String> {
+        let options = ExportOptions {
+            format: self.format.unwrap_or_default(),
+            gif_fps: self.fps.unwrap_or(GIF_FPS),
+            gif_max_width: self.width.map(|w| w.max(0) as u32).unwrap_or(GIF_MAX_WIDTH),
+        };
+        if options.gif_fps <= 0.0 || options.gif_max_width == 0 {
+            return Err("GIF fps and width must be positive".into());
+        }
+        Ok(options)
+    }
+
     pub fn new(command: Command) -> Self {
         Request {
             command,
@@ -190,6 +240,8 @@ impl Request {
             anchor: None,
             overlay_path: None,
             crop: None,
+            format: None,
+            fps: None,
         }
     }
 }

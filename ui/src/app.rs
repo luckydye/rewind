@@ -18,7 +18,7 @@ use gpui::*;
 use crate::icons;
 use crate::ipc::{self, Client, RawImage, Reply};
 use crate::paint::{Brush, BrushKind, Paint, Point, Rgb, StrokeSession, from_srgb_hex};
-use crate::protocol::{ClipRange, Command, Crop, Request};
+use crate::protocol::{ClipRange, Command, Crop, ExportFormat, Request};
 use crate::trace;
 
 // MARK: - Geometry
@@ -138,11 +138,32 @@ enum Busy {
     Copy,
 }
 
-/// What dismissing the overlay puts on the clipboard.
+/// What Copy puts on the clipboard and Export saves: the frame under the
+/// playhead as PNG, or the range as MP4 or GIF.
 #[derive(Clone, Copy, PartialEq)]
-enum CloseCopy {
+enum Output {
     Image,
-    Clip,
+    Mp4,
+    Gif,
+}
+
+impl Output {
+    fn label(self) -> &'static str {
+        match self {
+            Output::Image => "Image",
+            Output::Mp4 => "MP4",
+            Output::Gif => "GIF",
+        }
+    }
+
+    /// The clip format for range actions. ⌘C always copies the range, so with
+    /// Image selected it falls back to MP4.
+    fn clip_format(self) -> ExportFormat {
+        match self {
+            Output::Gif => ExportFormat::Gif,
+            Output::Image | Output::Mp4 => ExportFormat::Mp4,
+        }
+    }
 }
 
 /// Which range frame the stage shows while dragging.
@@ -254,8 +275,7 @@ pub struct Rewind {
     /// timer cannot speed playback up or slow it down.
     playback_clock: Option<Instant>,
     last_clip: Option<String>,
-    /// A close is in flight: the frame is being copied before the overlay hides.
-    close_copy: CloseCopy,
+    output: Output,
     /// Bumped whenever a close starts or the overlay is shown again, so a copy
     /// that finishes late cannot hide an overlay the user has reopened.
     close_generation: u64,
@@ -344,7 +364,7 @@ impl Rewind {
             status: None,
             ticker: None,
             playback_clock: None,
-            close_copy: CloseCopy::Image,
+            output: Output::Image,
             close_generation: 0,
             draw_eraser: false,
             weight_drag: None,
@@ -772,6 +792,10 @@ impl Rewind {
         }
         if self.crop.is_some() {
             return " · cropped".into();
+        }
+        // The estimate is the encoded MP4 frames; it says nothing about a GIF.
+        if self.output != Output::Mp4 {
+            return String::new();
         }
         match self.estimated_bytes {
             Some(bytes) if bytes > 0 => format!(" · ~{:.1} MB", bytes as f64 / 1_048_576.0),
@@ -1383,6 +1407,7 @@ impl Rewind {
 
     /// Export to ~/Movies/Rewind, or with `copy` render to the cache and put
     /// the file on the clipboard. Both are the same render on the daemon side.
+    /// Exporting with Image selected saves the frame under the playhead.
     fn render_clip(&mut self, copy: bool, cx: &mut Context<Self>) {
         self.render_clip_then(copy, false, cx);
     }
@@ -1392,7 +1417,8 @@ impl Rewind {
         if self.busy.is_some() {
             return;
         }
-        if self.selection_duration() < 0.05 {
+        let frame = !copy && self.output == Output::Image;
+        if !frame && self.selection_duration() < 0.05 {
             self.status = Some(Status::Error("select at least a moment".into()));
             cx.notify();
             return;
@@ -1409,6 +1435,8 @@ impl Rewind {
             from: self.sel_from,
             to: self.sel_to,
         };
+        let seconds = self.playhead;
+        let format = self.output.clip_format();
         let anchor = self.anchor;
         let client = self.client.clone();
         let annotations = (!self.paint.is_empty()).then(|| self.paint.clone());
@@ -1420,12 +1448,19 @@ impl Rewind {
                 .background_executor()
                 .spawn(async move {
                     let overlay = write_overlay(annotations.as_ref(), size)?;
-                    let mut request = Request::new(if copy {
+                    let mut request = Request::new(if frame {
+                        Command::ExportFrame
+                    } else if copy {
                         Command::CopyClip
                     } else {
                         Command::ExportClip
                     });
-                    request.range = Some(range);
+                    if frame {
+                        request.seconds = Some(seconds);
+                    } else {
+                        request.range = Some(range);
+                        request.format = Some(format);
+                    }
                     request.anchor = anchor;
                     request.overlay_path = overlay
                         .as_ref()
@@ -1460,17 +1495,27 @@ impl Rewind {
                         }
                     }
                 }
+                let kind = if format == ExportFormat::Gif { "GIF" } else { "clip" };
                 view.status = Some(match result {
                     Ok(response) => match response.clip {
                         Some(clip) if copy => Status::Info(format!(
-                            "Copied {:.1}s clip · {:.1} MB",
+                            "Copied {:.1}s {kind} · {:.1} MB",
                             clip.duration,
                             clip.bytes as f64 / 1_048_576.0
                         )),
+                        Some(clip) if frame => {
+                            view.last_clip = Some(clip.path);
+                            Status::Info(format!(
+                                "Saved {}×{} PNG · {:.1} MB",
+                                clip.width,
+                                clip.height,
+                                clip.bytes as f64 / 1_048_576.0
+                            ))
+                        }
                         Some(clip) => {
                             view.last_clip = Some(clip.path);
                             Status::Info(format!(
-                                "Saved {:.1}s · {:.1} MB",
+                                "Saved {:.1}s {kind} · {:.1} MB",
                                 clip.duration,
                                 clip.bytes as f64 / 1_048_576.0
                             ))
@@ -1540,7 +1585,7 @@ impl Rewind {
         self.close_generation = self.close_generation.wrapping_add(1);
         self.stop_playback();
 
-        if self.close_copy == CloseCopy::Clip {
+        if self.output != Output::Image {
             if self.selection_duration() < 0.05 {
                 self.closing = false;
                 self.status = Some(Status::Error("select at least a moment".into()));
@@ -2454,31 +2499,24 @@ impl Rewind {
             );
         }
 
-        let close_switch = group()
-            .child(
-                segment("Image", self.close_copy == CloseCopy::Image).on_mouse_down(
+        let output_switch = [Output::Image, Output::Mp4, Output::Gif].into_iter().fold(
+            group(),
+            |switch, output| {
+                switch.child(segment(output.label(), self.output == output).on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|view, _: &MouseDownEvent, _window, cx| {
-                        view.close_copy = CloseCopy::Image;
+                    cx.listener(move |view, _: &MouseDownEvent, _window, cx| {
+                        view.output = output;
                         cx.notify();
                     }),
-                ),
-            )
-            .child(
-                segment("Video", self.close_copy == CloseCopy::Clip).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|view, _: &MouseDownEvent, _window, cx| {
-                        view.close_copy = CloseCopy::Clip;
-                        cx.notify();
-                    }),
-                ),
-            );
+                ))
+            },
+        );
 
         let secondary = secondary_button("Copy", "Enter", self.busy == Some(Busy::Copy))
             .on_mouse_down(
                 MouseButton::Left,
                 // Same as Enter, whose shortcut it shows: copies what the
-                // Image / Video switch says, then closes.
+                // Image / MP4 / GIF switch says, then closes.
                 cx.listener(|view, _: &MouseDownEvent, _window, cx| view.close(cx)),
             );
 
@@ -2490,7 +2528,7 @@ impl Rewind {
             .flex()
             .items_center()
             .gap(px(4.0))
-            .child(close_switch)
+            .child(output_switch)
             .child(secondary)
             .child(
                 primary_button("Export", EXPORT_SHORTCUT, self.busy == Some(Busy::Export))

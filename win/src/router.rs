@@ -47,7 +47,8 @@ fn route(request: Request, cx: &Context) -> Result<Reply, String> {
             let clip = recorder.export(
                 range.from,
                 range.to,
-                request.path.map(PathBuf::from),
+                request.path.clone().map(PathBuf::from),
+                request.export_options()?,
                 request.anchor,
                 request.overlay_path.as_deref(),
                 request.crop.as_ref(),
@@ -58,15 +59,28 @@ fn route(request: Request, cx: &Context) -> Result<Reply, String> {
         Command::CopyClip => {
             let range = request.range.filter(|r| r.to >= 0.0 && r.duration() > 0.0)
                 .ok_or("copyClip needs a range with from > to >= 0")?;
+            let options = request.export_options()?;
             let clip = recorder.export(
                 range.from,
                 range.to,
-                Some(clipboard::new_cached_clip_path()),
+                Some(clipboard::new_cached_clip_path(options.format.extension())),
+                options,
                 request.anchor,
                 request.overlay_path.as_deref(),
                 request.crop.as_ref(),
             )?;
             clipboard::copy_file(std::path::Path::new(&clip.path))?;
+            Reply::Json(Response { clip: Some(clip), ..with_state(cx) })
+        }
+
+        Command::ExportFrame => {
+            let clip = recorder.export_frame(
+                request.seconds.unwrap_or(0.0),
+                request.path.clone().map(PathBuf::from),
+                request.anchor,
+                request.overlay_path.as_deref(),
+                request.crop.as_ref(),
+            )?;
             Reply::Json(Response { clip: Some(clip), ..with_state(cx) })
         }
 

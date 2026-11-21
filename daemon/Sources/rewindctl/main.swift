@@ -32,6 +32,11 @@ private func usage() -> Never {
           rewindctl status [--json]
           rewindctl start | stop | quit
           rewindctl export [--seconds N | --from A --to B] [--out PATH]
+                           [--format mp4 | gif | png]
+                           [--gif-fps N] [--gif-width PX]   (gif: 15 fps, 1280 px)
+                           [--at SECONDS]                    (png: frame that long ago)
+                           [--overlay RGBA] [--crop x,y,w,h]
+          rewindctl copy   (same options as export, mp4 or gif; puts the file on the clipboard)
           rewindctl config [--buffer S] [--fps N] [--height PX] [--display N]
                            [--app BUNDLE_ID | --whole-screen] [--bitrate B]
           rewindctl preview --ago SECONDS [--width PX] [--out clip.png]
@@ -88,6 +93,14 @@ private func option(_ name: String, _ arguments: [String]) -> String? {
 
 private func has(_ name: String, _ arguments: [String]) -> Bool {
     arguments.contains(name)
+}
+
+/// `--crop x,y,w,h` as fractions of the capture.
+private func crop(_ arguments: [String]) -> Crop? {
+    guard let raw = option("--crop", arguments) else { return nil }
+    let parts = raw.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+    guard parts.count == 4 else { fail("--crop takes x,y,w,h as fractions") }
+    return Crop(x: parts[0], y: parts[1], width: parts[2], height: parts[3])
 }
 
 /// Writes the raw BGRA frame as a lossless PNG, so what you look at is exactly
@@ -163,20 +176,38 @@ do {
         guard response.ok else { fail(response.error ?? "unexpected response") }
         print("rewindd is shutting down")
 
-    case "export":
+    case "export", "copy":
         let seconds = option("--seconds", arguments).flatMap(Double.init) ?? 30
         let from = option("--from", arguments).flatMap(Double.init) ?? seconds
         let to = option("--to", arguments).flatMap(Double.init) ?? 0
         let out = option("--out", arguments)
-        let response = try json(
-            try client.send(
-                Request(
-                    command: .exportClip,
-                    path: out,
-                    range: ClipRange(from: from, to: to)
-                )
+        let format = option("--format", arguments) ?? "mp4"
+        let request: Request
+        if format == "png" {
+            guard command == "export" else { fail("copy takes --format mp4 or gif") }
+            request = Request(
+                command: .exportFrame,
+                seconds: option("--at", arguments).flatMap(Double.init) ?? 0,
+                path: out,
+                overlayPath: option("--overlay", arguments),
+                crop: crop(arguments)
             )
-        )
+        } else {
+            guard let clipFormat = ExportFormat(rawValue: format) else {
+                fail("--format must be mp4, gif or png")
+            }
+            request = Request(
+                command: command == "export" ? .exportClip : .copyClip,
+                path: out,
+                width: option("--gif-width", arguments).flatMap(Int.init),
+                range: ClipRange(from: from, to: to),
+                overlayPath: option("--overlay", arguments),
+                crop: crop(arguments),
+                format: clipFormat,
+                fps: option("--gif-fps", arguments).flatMap(Double.init)
+            )
+        }
+        let response = try json(try client.send(request))
         guard response.ok, let clip = response.clip else {
             fail(response.error ?? "unexpected response")
         }
@@ -185,7 +216,8 @@ do {
         } else {
             print(
                 String(
-                    format: "saved %@ — %.2fs, %.1f MB, %d frames, %dx%d",
+                    format: "%@ %@ — %.2fs, %.1f MB, %d frames, %dx%d",
+                    command == "export" ? "saved" : "copied",
                     clip.path,
                     clip.duration,
                     Double(clip.bytes) / 1_048_576,

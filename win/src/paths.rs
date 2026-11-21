@@ -57,10 +57,10 @@ pub fn overlay_event_name() -> String {
 }
 
 /// `Rewind 2026-11-21 14.03.22.mp4`, same as the macOS daemon.
-pub fn timestamped_clip_name() -> String {
+pub fn timestamped_clip_name(extension: &str) -> String {
     let t = unsafe { GetLocalTime() };
     format!(
-        "Rewind {:04}-{:02}-{:02} {:02}.{:02}.{:02}.mp4",
+        "Rewind {:04}-{:02}-{:02} {:02}.{:02}.{:02}.{extension}",
         t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
     )
 }

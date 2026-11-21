@@ -73,6 +73,7 @@ pub enum Command {
     Stop,
     SetConfig,
     ExportClip,
+    ExportFrame,
     ListDisplays,
     ListApplications,
     PreviewFrame,
@@ -105,6 +106,14 @@ pub struct Crop {
     pub height: f64,
 }
 
+/// What `exportClip` and `copyClip` write. `exportFrame` always writes PNG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Mp4,
+    Gif,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
@@ -129,6 +138,12 @@ pub struct Request {
     /// The part of the capture to keep, if it was cropped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crop: Option<Crop>,
+    /// Clip format; MP4 when absent. For GIF, `width` is the maximum width.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<ExportFormat>,
+    /// GIF frame rate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f64>,
 }
 
 impl Request {
@@ -144,6 +159,8 @@ impl Request {
             count: None,
             overlay_path: None,
             crop: None,
+            format: None,
+            fps: None,
         }
     }
 }

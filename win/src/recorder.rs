@@ -6,7 +6,7 @@
 //! the decoder (held for a decode). A status request never waits on a decode.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -18,12 +18,13 @@ use crate::annotation::{self, Overlay};
 use crate::config_store;
 use crate::transcode::Reencoder;
 use crate::d3d;
+use crate::image_file::{self, GifWriter};
 use crate::mp4;
 use crate::paths;
 use crate::pipeline::Pipeline;
 use crate::preview::{Decoded, PreviewEngine};
-use crate::protocol::{ApplicationInfo, Clip, Crop, DisplayInfo, RawImage, RecorderConfig, State};
-use crate::ring::{Snapshot, TICKS_PER_SECOND};
+use crate::protocol::{ApplicationInfo, Clip, Crop, DisplayInfo, ExportFormat, ExportOptions, RawImage, RecorderConfig, State};
+use crate::ring::{self, Snapshot, TICKS_PER_SECOND};
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -210,18 +211,33 @@ impl Recorder {
 
     /// Without annotations or a crop the encoded frames are muxed as they
     /// are; either one needs every frame decoded, changed and re-encoded.
+    /// A GIF is always decoded.
     pub fn export(
         &self,
         from: f64,
         to: f64,
         path: Option<PathBuf>,
+        options: ExportOptions,
         anchor: Option<f64>,
         overlay_path: Option<&str>,
         crop: Option<&Crop>,
     ) -> Result<Clip, String> {
         let frozen = self.freeze(from, to, anchor)?;
-        let path = path.unwrap_or_else(|| paths::clips_dir().join(paths::timestamped_clip_name()));
+        let path = path.unwrap_or_else(|| paths::clips_dir().join(paths::timestamped_clip_name(options.format.extension())));
         let overlay = overlay_path.map(Overlay::load).transpose()?;
+
+        if options.format == ExportFormat::Gif {
+            let overlay = overlay.map(|o| o.fitted(frozen.size.0, frozen.size.1));
+            let size = write_gif(&frozen, overlay.as_ref(), crop, options, &path)?;
+            return Ok(Clip {
+                bytes: file_size(&path)?,
+                path: path.display().to_string(),
+                duration: frozen.snapshot.duration(),
+                frames: frozen.snapshot.packets.len() as i64,
+                width: size.0 as i64,
+                height: size.1 as i64,
+            });
+        }
 
         let (snapshot, size) = if overlay.is_some() || crop.is_some() {
             let overlay = overlay.map(|o| o.fitted(frozen.size.0, frozen.size.1));
@@ -257,6 +273,28 @@ impl Recorder {
         let frame = self.preview(seconds_ago, 0, anchor)?;
         let overlay = overlay_path.map(Overlay::load).transpose()?.map(|o| o.fitted(frame.width, frame.height));
         Ok(annotation::apply(frame, overlay.as_ref(), crop))
+    }
+
+    /// The composed frame as a PNG next to the clips.
+    pub fn export_frame(
+        &self,
+        seconds_ago: f64,
+        path: Option<PathBuf>,
+        anchor: Option<f64>,
+        overlay_path: Option<&str>,
+        crop: Option<&Crop>,
+    ) -> Result<Clip, String> {
+        let image = self.composed_frame(seconds_ago, anchor, overlay_path, crop)?;
+        let path = path.unwrap_or_else(|| paths::clips_dir().join(paths::timestamped_clip_name("png")));
+        image_file::write_png(&path, &image)?;
+        Ok(Clip {
+            bytes: file_size(&path)?,
+            path: path.display().to_string(),
+            duration: 0.0,
+            frames: 1,
+            width: image.width as i64,
+            height: image.height as i64,
+        })
     }
 
     /// Exact encoded size of a range: the exporter's cut, without muxing.
@@ -447,6 +485,28 @@ fn compose(frozen: &Frozen, overlay: Option<&Overlay>, crop: Option<&Crop>, size
         eprintln!("rewindd: re-encode produced {} of {} frames", output.packets.len(), frozen.snapshot.packets.len());
     }
     Ok(output)
+}
+
+/// Decodes the frames the GIF timeline keeps (the decoder steps through the
+/// ones in between), burns in the drawing, crops, and hands each to WIC.
+/// Returns the GIF's pixel size.
+fn write_gif(frozen: &Frozen, overlay: Option<&Overlay>, crop: Option<&Crop>, options: ExportOptions, path: &Path) -> Result<(u32, u32), String> {
+    let times: Vec<f64> = frozen.snapshot.packets.iter().map(|p| ring::seconds(p.pts)).collect();
+    let mut decoder = PreviewEngine::default();
+    let mut gif = GifWriter::create(path, options.gif_max_width)?;
+    for frame in image_file::gif_timeline(&times, options.gif_fps) {
+        let image = decoder.frame(&frozen.snapshot, frame.index, 0, frozen.size)?;
+        gif.push(&annotation::apply(image, overlay, crop), frame.delay)?;
+    }
+    let size = gif.size;
+    gif.finish()?;
+    Ok(size)
+}
+
+fn file_size(path: &Path) -> Result<i64, String> {
+    std::fs::metadata(path)
+        .map(|m| m.len() as i64)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))
 }
 
 pub fn displays() -> Vec<DisplayInfo> {

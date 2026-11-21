@@ -137,17 +137,32 @@ actor Recorder {
         from: Double,
         to: Double,
         path: String?,
+        format: ExportFormat = .mp4,
+        gifFps: Double = GifDefaults.fps,
+        gifMaxWidth: Int = GifDefaults.maxWidth,
         anchor: Double? = nil,
         overlayPath: String? = nil,
         crop: Crop? = nil
     ) async throws -> Clip {
-        guard let ring, let encoder else { throw RecorderError.notRecording }
+        guard let ring else { throw RecorderError.notRecording }
         let snapshot = try ring.snapshot(from: from, to: to, anchor: anchor)
-        let url = path.map { URL(fileURLWithPath: $0) } ?? Self.newClipURL()
+        let url = path.map { URL(fileURLWithPath: $0) } ?? Self.newExportURL(extension: format.fileExtension)
 
         let result: ExportResult
         let overlay = try overlayPath.map(AnnotationOverlay.load)
-        if overlay != nil || crop != nil {
+        switch format {
+        case .gif:
+            result = try await Task.detached {
+                try GifExporter.write(
+                    frames: snapshot.frames,
+                    overlay: overlay,
+                    crop: crop,
+                    fps: gifFps,
+                    maxWidth: gifMaxWidth,
+                    to: url
+                )
+            }.value
+        case .mp4 where overlay != nil || crop != nil:
             result = try await Task.detached {
                 try await ClipExporter.writeComposed(
                     frames: snapshot.frames,
@@ -156,21 +171,67 @@ actor Recorder {
                     to: url
                 )
             }.value
-        } else {
+        case .mp4:
             result = try await Task.detached {
                 try ClipExporter.write(frames: snapshot.frames, to: url)
             }.value
         }
-
-        let size = try Self.pixelSize(of: result.url)
 
         return Clip(
             path: result.url.path,
             duration: result.duration,
             bytes: result.bytes,
             frames: snapshot.frames.count,
-            width: size.0,
-            height: size.1
+            width: result.width,
+            height: result.height
+        )
+    }
+
+    /// The native frame under the playhead with the drawing burnt in and the
+    /// crop applied: what Copy puts on the clipboard and Export saves as PNG.
+    func composedFrame(
+        secondsAgo: Double,
+        anchor: Double?,
+        overlayPath: String?,
+        crop: Crop?
+    ) async throws -> RawImage {
+        var image = try await preview(secondsAgo: secondsAgo, width: 0, anchor: anchor)
+        if let overlayPath {
+            image = try AnnotationOverlay.load(overlayPath).composite(image)
+        }
+        if let crop {
+            image = try image.cropped(to: crop)
+        }
+        return image
+    }
+
+    func exportFrame(
+        secondsAgo: Double,
+        path: String?,
+        anchor: Double?,
+        overlayPath: String?,
+        crop: Crop?
+    ) async throws -> Clip {
+        let image = try await composedFrame(
+            secondsAgo: secondsAgo,
+            anchor: anchor,
+            overlayPath: overlayPath,
+            crop: crop
+        )
+        let url = path.map { URL(fileURLWithPath: $0) } ?? Self.newExportURL(extension: "png")
+        let data = try autoreleasepool { try image.pngData() }
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: url)
+        return Clip(
+            path: url.path,
+            duration: 0,
+            bytes: data.count,
+            frames: 1,
+            width: image.width,
+            height: image.height
         )
     }
 
@@ -181,15 +242,6 @@ actor Recorder {
         let now = anchor ?? last.presentationTimeStamp.seconds
         let index = Self.frameIndex(at: now - secondsAgo, frames: snapshot.frames)
         return try previews.frame(frames: snapshot.frames, index: index, width: width)
-    }
-
-    /// Encoded size of a clip, which a crop can change.
-    private static func pixelSize(of url: URL) throws -> (Int, Int) {
-        let asset = AVURLAsset(url: url)
-        guard let track = asset.tracks(withMediaType: .video).first else {
-            return (0, 0)
-        }
-        return (Int(abs(track.naturalSize.width)), Int(abs(track.naturalSize.height)))
     }
 
     /// Keyframes are at most a second apart, so walking back a few steps is
@@ -288,13 +340,15 @@ actor Recorder {
         await beginCapture()
     }
 
-    private static func newClipURL() -> URL {
+    /// Clips, GIFs and frames all go to ~/Movies/Rewind, so the menu's recent
+    /// clips and Reveal find them in one place.
+    private static func newExportURL(extension fileExtension: String) -> URL {
         let movies = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
         let directory = movies.appendingPathComponent("Rewind", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        return directory.appendingPathComponent("Rewind \(formatter.string(from: Date())).mp4")
+        return directory.appendingPathComponent("Rewind \(formatter.string(from: Date())).\(fileExtension)")
     }
 }

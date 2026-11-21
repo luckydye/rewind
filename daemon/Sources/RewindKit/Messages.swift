@@ -19,6 +19,7 @@ public enum Command: String, Codable, Sendable {
     case stop
     case setConfig
     case exportClip
+    case exportFrame
     case listDisplays
     case listApplications
     case previewFrame
@@ -46,6 +47,21 @@ public struct Crop: Codable, Sendable {
     }
 }
 
+/// What `exportClip` and `copyClip` write. `exportFrame` always writes PNG.
+public enum ExportFormat: String, Codable, Sendable {
+    case mp4
+    case gif
+
+    public var fileExtension: String { rawValue }
+}
+
+/// GIFs are sampled down from the capture: full rate and native size make
+/// files of hundreds of megabytes that nothing will play smoothly.
+public enum GifDefaults {
+    public static let fps: Double = 15
+    public static let maxWidth = 1280
+}
+
 /// Flat request shape on purpose: the UI is written in Rust and mirrors these
 /// structs by hand, so no associated values or custom coding.
 public struct Request: Codable, Sendable {
@@ -65,6 +81,10 @@ public struct Request: Codable, Sendable {
     public var overlayPath: String?
     /// The part of the capture to keep, if it was cropped.
     public var crop: Crop?
+    /// Clip format; MP4 when absent. For GIF, `width` is the maximum width.
+    public var format: ExportFormat?
+    /// GIF frame rate.
+    public var fps: Double?
 
     public init(
         command: Command,
@@ -76,7 +96,9 @@ public struct Request: Codable, Sendable {
         range: ClipRange? = nil,
         anchor: Double? = nil,
         overlayPath: String? = nil,
-        crop: Crop? = nil
+        crop: Crop? = nil,
+        format: ExportFormat? = nil,
+        fps: Double? = nil
     ) {
         self.command = command
         self.config = config
@@ -88,6 +110,8 @@ public struct Request: Codable, Sendable {
         self.anchor = anchor
         self.overlayPath = overlayPath
         self.crop = crop
+        self.format = format
+        self.fps = fps
     }
 }
 
