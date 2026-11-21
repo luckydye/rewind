@@ -173,7 +173,7 @@ impl Recorder {
         let o = Ordering::Relaxed;
         let pipeline = inner.pipeline.as_ref();
         let stats = pipeline.map(|p| p.ring.statistics());
-        let (bytes, duration) = stats.as_ref().map(|s| (s.bytes, s.duration)).unwrap_or((0, 0.0));
+        let (bytes, duration, span) = stats.as_ref().map(|s| (s.bytes, s.duration, s.span)).unwrap_or((0, 0.0, 0.0));
         State {
             recording: pipeline.is_some(),
             config: inner.config.clone(),
@@ -183,7 +183,7 @@ impl Recorder {
             buffer_seconds: inner.config.buffer_seconds,
             available_seconds: duration,
             buffer_bytes: bytes as i64,
-            bitrate: if duration > 0.0 { bytes as f64 * 8.0 / duration } else { 0.0 },
+            bitrate: if span > 0.0 { bytes as f64 * 8.0 / span } else { 0.0 },
             frames_captured: pipeline.map(|p| p.capture_counters.captured.load(o) as i64).unwrap_or(0),
             frames_encoded: pipeline.map(|p| p.encoder_counters.encoded.load(o) as i64).unwrap_or(0),
             dropped_frames: pipeline.map(|p| p.capture_counters.dropped.load(o) as i64).unwrap_or(0),
@@ -197,6 +197,10 @@ impl Recorder {
     fn freeze(&self, from: f64, to: f64, anchor: Option<f64>) -> Result<Frozen, String> {
         let inner = self.inner.lock().unwrap();
         let pipeline = inner.pipeline.as_ref().ok_or("rewindd is not recording")?;
+        // Every overlay request carries its anchor; keep what it can reach.
+        if let Some(anchor) = anchor {
+            pipeline.ring.pin(anchor);
+        }
         Ok(Frozen {
             snapshot: pipeline.ring.snapshot(from, to, anchor)?,
             size: (pipeline.width, pipeline.height),

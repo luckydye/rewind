@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// 100 ns units, the clock Windows.Graphics.Capture and Media Foundation use.
 pub const TICKS_PER_SECOND: i64 = 10_000_000;
@@ -66,7 +67,10 @@ impl Snapshot {
 
 pub struct Statistics {
     pub bytes: usize,
+    /// What the overlay can use: at most the buffer length.
     pub duration: f64,
+    /// Everything held, including what a pin keeps past the buffer length.
+    pub span: f64,
     pub frames: usize,
     pub newest: Option<f64>,
 }
@@ -75,7 +79,14 @@ struct Inner {
     packets: VecDeque<Arc<Packet>>,
     bytes: usize,
     parameters: Option<ParameterSets>,
+    /// Oldest timestamp an open overlay can still reach, and when it last
+    /// asked. See `pin`.
+    pin: Option<(i64, Instant)>,
 }
+
+/// How long a pin outlives the overlay's last request. Long enough for a
+/// pause mid-review, short enough that a closed overlay stops holding memory.
+const PIN_LIFETIME: Duration = Duration::from_secs(60);
 
 pub struct Ring {
     inner: Mutex<Inner>,
@@ -86,7 +97,7 @@ pub struct Ring {
 impl Ring {
     pub fn new(capacity_seconds: f64, byte_limit: usize) -> Self {
         Ring {
-            inner: Mutex::new(Inner { packets: VecDeque::new(), bytes: 0, parameters: None }),
+            inner: Mutex::new(Inner { packets: VecDeque::new(), bytes: 0, parameters: None, pin: None }),
             capacity: (capacity_seconds * TICKS_PER_SECOND as f64) as i64,
             byte_limit,
         }
@@ -100,14 +111,30 @@ impl Ring {
         self.inner.lock().unwrap().parameters.is_some()
     }
 
+    /// The overlay measures time from an anchor it pins when it opens, while
+    /// capture keeps running. Evicting by age alone then deletes the frames
+    /// under its playhead: after a few seconds in the overlay, a point 50 s
+    /// back sits at the eviction edge, and playing forward at 1x keeps pace
+    /// with eviction at 1x — one keyframe a second, ~1 fps. A pin keeps
+    /// everything the overlay can reach, `capacity` before its anchor.
+    pub fn pin(&self, anchor_seconds: f64) {
+        let floor = (anchor_seconds * TICKS_PER_SECOND as f64) as i64 - self.capacity;
+        self.inner.lock().unwrap().pin = Some((floor, Instant::now()));
+    }
+
     pub fn append(&self, packet: Packet) {
         let mut inner = self.inner.lock().unwrap();
         inner.bytes += packet.data.len();
         inner.packets.push_back(Arc::new(packet));
 
+        let floor = inner.pin.filter(|(_, at)| at.elapsed() < PIN_LIFETIME).map(|(floor, _)| floor);
         while inner.packets.len() > 1 {
-            let span = inner.packets.back().unwrap().pts - inner.packets.front().unwrap().pts;
-            if span <= self.capacity && inner.bytes <= self.byte_limit {
+            let oldest = inner.packets.front().unwrap().pts;
+            let span = inner.packets.back().unwrap().pts - oldest;
+            // The byte limit always wins: memory is bounded even while pinned.
+            let over_bytes = inner.bytes > self.byte_limit;
+            let over_time = span > self.capacity && floor.is_none_or(|floor| oldest < floor);
+            if !over_bytes && !over_time {
                 break;
             }
             let evicted = inner.packets.pop_front().unwrap();
@@ -158,11 +185,15 @@ impl Ring {
     pub fn statistics(&self) -> Statistics {
         let inner = self.inner.lock().unwrap();
         let (Some(first), Some(last)) = (inner.packets.front(), inner.packets.back()) else {
-            return Statistics { bytes: 0, duration: 0.0, frames: 0, newest: None };
+            return Statistics { bytes: 0, duration: 0.0, span: 0.0, frames: 0, newest: None };
         };
         Statistics {
             bytes: inner.bytes,
-            duration: seconds(last.pts - first.pts),
+            // A pin can keep more than `capacity` around. The overlay sizes its
+            // timeline from this and pins its new anchor at `capacity`, so
+            // reporting the extra would send Home into frames about to go.
+            duration: seconds((last.pts - first.pts).min(self.capacity)),
+            span: seconds(last.pts - first.pts),
             frames: inner.packets.len(),
             newest: Some(seconds(last.pts)),
         }

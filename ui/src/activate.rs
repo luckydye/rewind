@@ -56,6 +56,14 @@ fn only_window() -> *mut c_void {
 /// version needs the handle.
 pub fn remember(_window: &gpui::Window) {}
 
+/// The Windows overlay uncloaks after its first frame is presented; AppKit's
+/// alpha fade covers the same moment, so there is nothing to do here.
+pub fn take_reveal() -> bool {
+    false
+}
+
+pub fn reveal() {}
+
 /// The overlay stays resident between uses, so it must not sit in the Dock
 /// or the app switcher: NSApplicationActivationPolicyAccessory.
 pub fn make_accessory() {

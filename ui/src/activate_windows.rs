@@ -12,13 +12,15 @@
 //! * `WDA_EXCLUDEFROMCAPTURE` is `NSWindowSharingNone`: the recorder never
 //!   films its own overlay.
 
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromWindow};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromWindow, RDW_INTERNALPAINT, RedrawWindow,
+};
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
+    DWMWA_CLOAK, DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -154,8 +156,66 @@ pub fn hide() {
     }
 }
 
-/// No fade on Windows: GPUI composites through DirectComposition, which a
-/// layered-window alpha cannot animate, and the overlay appears instantly.
-pub fn prepare_fade() {}
+/// A hidden window keeps its last drawn surface, so showing it would flash
+/// the previous session's overlay before the new one is drawn. macOS starts
+/// at alpha 0 for the same reason; a DirectComposition window cannot take a
+/// layered alpha, so it is cloaked instead: shown, focusable, and able to take
+/// the foreground, but nothing on screen until it is uncloaked.
+///
+/// GPUI draws only on `WM_PAINT`, which a cloaked window never receives (it
+/// has no visible region), so while cloaked a pump posts paints itself with
+/// `RDW_INTERNALPAINT`. That lets GPUI draw the new overlay off screen, and the
+/// frame callbacks that uncloak it run. The pump uncloaks after 1.5 s
+/// regardless, so a missing frame can never leave the overlay invisible.
+pub fn prepare_fade() {
+    REVEAL_PENDING.store(false, Ordering::Relaxed);
+    let Some(hwnd) = hwnd() else { return };
+    set_cloaked(true);
+    let generation = CLOAK_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let raw = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        let hwnd = HWND(raw as *mut _);
+        let started = std::time::Instant::now();
+        while CLOAK_GENERATION.load(Ordering::SeqCst) == generation {
+            if started.elapsed() > std::time::Duration::from_millis(1500) {
+                reveal();
+                break;
+            }
+            unsafe {
+                let _ = RedrawWindow(Some(hwnd), None, None, RDW_INTERNALPAINT);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(8));
+        }
+    });
+}
 
-pub fn start_fade() {}
+/// Bumped by every cloak and every reveal; the paint pump runs only while
+/// its own cloak is the current one.
+static CLOAK_GENERATION: AtomicUsize = AtomicUsize::new(0);
+
+/// The first real frame has arrived. The uncloak waits for the render that
+/// shows it; see `take_reveal`.
+pub fn start_fade() {
+    REVEAL_PENDING.store(true, Ordering::Relaxed);
+}
+
+/// True once, for the render after `start_fade`: that render should schedule
+/// `reveal` for after it is on screen.
+pub fn take_reveal() -> bool {
+    REVEAL_PENDING.swap(false, Ordering::Relaxed)
+}
+
+pub fn reveal() {
+    CLOAK_GENERATION.fetch_add(1, Ordering::SeqCst);
+    set_cloaked(false);
+}
+
+static REVEAL_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn set_cloaked(cloaked: bool) {
+    let Some(hwnd) = hwnd() else { return };
+    let value: i32 = cloaked.into();
+    unsafe {
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, &value as *const _ as *const _, size_of_val(&value) as u32);
+    }
+}

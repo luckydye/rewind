@@ -392,6 +392,20 @@ Decisions worth knowing:
   windows in logical pixels. Above 100% scaling that is smaller than the
   screen, and the first show happens before the daemon has reported which
   display is captured.
+- **The ring stops evicting what an open overlay can reach.** The overlay
+  pins "now" when it opens, while capture keeps running and the ring keeps
+  evicting at 1 s per second. After a few seconds in the overlay, a point
+  50 s back sits at the eviction edge. Playing forward at 1× then keeps
+  pace with eviction at 1×, so the frames under the playhead are deleted
+  as they are needed: one keyframe a second, ~1 fps. Every anchored
+  request now pins the ring, and nothing newer than anchor minus buffer
+  length is evicted. The pin lapses 60 s after the last request, and the
+  512 MB byte limit still applies. The reported available duration is
+  capped at the buffer length, so a reopened overlay never sizes its
+  timeline to frames the new pin will release.
+
+  Driving the real overlay at the eviction edge (open, wait 12 s, Home,
+  play) went from 1.3 fps to 23–27 fps.
 - **Playback decodes ahead.** The overlay plays back by asking for one
   frame at a time, so any slow decode is a visible stall. Two of them made
   playback jaggy:
@@ -406,11 +420,26 @@ Decisions worth knowing:
   aside while a request does wait. `rewindctl play --from 50` replays the
   overlay's request pattern. `REWIND_TRACE=1` on the daemon logs each
   request: cache hit or miss, the decoder's position, and lock wait.
+  `REWIND_UI_TRACE=1` makes the overlay log its round trips and render
+  cadence. The daemon passes its environment to the overlay it spawns, so
+  both traces land in the daemon's stderr.
 - **Thumbnails decode in parallel.** Each thumbnail is an independent
   keyframe, so each distinct one is decoded once across up to six decoders:
   250 ms for 24 at 1440p instead of 1.1 s in sequence.
-- **No fade-in.** GPUI composites through DirectComposition, which a
-  layered-window alpha cannot animate, so the overlay simply appears.
+- **The overlay is cloaked until its first frame is on screen.** A hidden
+  window keeps its last drawn surface, so showing it flashed the previous
+  session's finished UI before the entrance animation. macOS avoids this
+  by starting at alpha 0. GPUI composites through DirectComposition,
+  which cannot take a layered alpha, so the window is shown cloaked
+  (`DWMWA_CLOAK`) instead: it is shown and takes the foreground, but
+  nothing reaches the screen.
+
+  GPUI draws only on `WM_PAINT`, which a cloaked window never receives. So
+  while cloaked, a pump posts `RDW_INTERNALPAINT` every 8 ms. When the
+  first real frame has been rendered and presented (two `on_next_frame`
+  hops later), the window uncloaks. After 1.5 s it uncloaks regardless.
+  Recorded at 60 fps with the overlay made capturable, the first visible
+  frame is the start of the entrance animation.
 - **Annotations and crops are burnt in on the CPU and re-encoded on the
   GPU.** Copy Frame composites the overlay's RGBA layer onto the native
   frame, then crops, as `AnnotationOverlay.swift` and `Crop.swift` do. A clip

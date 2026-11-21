@@ -19,6 +19,7 @@ use crate::icons;
 use crate::ipc::{self, Client, RawImage, Reply};
 use crate::paint::{Brush, BrushKind, Paint, Point, Rgb, StrokeSession, from_srgb_hex};
 use crate::protocol::{ClipRange, Command, Crop, Request};
+use crate::trace;
 
 // MARK: - Geometry
 
@@ -1285,11 +1286,16 @@ impl Rewind {
                     request.seconds = Some(seconds);
                     request.anchor = anchor;
                     request.width = Some(if lean { PLAYBACK_WIDTH } else { PREVIEW_WIDTH });
-                    client.send(&request)
+                    let traced = trace::start();
+                    let reply = client.send(&request);
+                    trace::round_trip(traced);
+                    reply
                 })
                 .await;
 
+            let traced = trace::start();
             this.update(cx, |view, cx| view.received(reply, cx)).ok();
+            trace::received(traced);
         })
         .detach();
     }
@@ -1772,10 +1778,25 @@ impl Rewind {
 
 impl Render for Rewind {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let traced = trace::start();
         // Anything queued from the last frame is no longer referenced by the
         // tree about to be replaced, so it can go now.
         for image in std::mem::take(&mut self.graveyard) {
             cx.drop_image(image, Some(window));
+        }
+        trace::render(traced);
+
+        // Windows: the window is cloaked until the first real frame is on
+        // screen. This render draws it; uncloak one frame later, once it has
+        // been presented, so the previous session's surface never shows.
+        if crate::activate::take_reveal() {
+            // `request_animation_frame` needs a view being rendered, which a
+            // frame callback is not; `refresh` asks for the next frame without.
+            window.on_next_frame(|window, _| {
+                window.on_next_frame(|_, _| crate::activate::reveal());
+                window.refresh();
+            });
+            window.request_animation_frame();
         }
 
         // Nothing else in the overlay is focusable, and the window can lose key

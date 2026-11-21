@@ -9,6 +9,7 @@ mod ipc;
 mod paint;
 mod protocol;
 mod signal;
+mod trace;
 
 use std::fs;
 
