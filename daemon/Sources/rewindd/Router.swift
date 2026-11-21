@@ -32,7 +32,8 @@ enum Router {
                     to: range.to,
                     path: request.path,
                     anchor: request.anchor,
-                    overlayPath: request.overlayPath
+                    overlayPath: request.overlayPath,
+                    crop: request.crop
                 )
                 return .json(Response(ok: true, state: await recorder.state(), clip: clip))
 
@@ -45,7 +46,8 @@ enum Router {
                     to: range.to,
                     path: Clipboard.newCachedClipURL().path,
                     anchor: request.anchor,
-                    overlayPath: request.overlayPath
+                    overlayPath: request.overlayPath,
+                    crop: request.crop
                 )
                 try await Clipboard.copyFile(URL(fileURLWithPath: clip.path))
                 return .json(Response(ok: true, state: await recorder.state(), clip: clip))
@@ -105,6 +107,9 @@ enum Router {
                 )
                 if let overlayPath = request.overlayPath {
                     image = try AnnotationOverlay.load(overlayPath).composite(image)
+                }
+                if let crop = request.crop {
+                    image = try image.cropped(to: crop)
                 }
                 try await Clipboard.copy(image)
                 return .json(Response(ok: true))

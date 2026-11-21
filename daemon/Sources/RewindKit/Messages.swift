@@ -31,6 +31,21 @@ public enum Command: String, Codable, Sendable {
     case quit
 }
 
+/// A rectangle of the capture, as fractions of its width and height.
+public struct Crop: Codable, Sendable {
+    public var x: Double
+    public var y: Double
+    public var width: Double
+    public var height: Double
+
+    public init(x: Double, y: Double, width: Double, height: Double) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+    }
+}
+
 /// Flat request shape on purpose: the UI is written in Rust and mirrors these
 /// structs by hand, so no associated values or custom coding.
 public struct Request: Codable, Sendable {
@@ -48,6 +63,8 @@ public struct Request: Codable, Sendable {
     /// Raw RGBA annotation layer (u32 width, u32 height, then pixels) for the
     /// daemon to composite into a copied frame or an exported clip.
     public var overlayPath: String?
+    /// The part of the capture to keep, if it was cropped.
+    public var crop: Crop?
 
     public init(
         command: Command,
@@ -58,7 +75,8 @@ public struct Request: Codable, Sendable {
         count: Int? = nil,
         range: ClipRange? = nil,
         anchor: Double? = nil,
-        overlayPath: String? = nil
+        overlayPath: String? = nil,
+        crop: Crop? = nil
     ) {
         self.command = command
         self.config = config
@@ -69,6 +87,7 @@ public struct Request: Codable, Sendable {
         self.range = range
         self.anchor = anchor
         self.overlayPath = overlayPath
+        self.crop = crop
     }
 }
 

@@ -94,6 +94,17 @@ pub struct ClipRange {
     pub to: f64,
 }
 
+/// A rectangle of the capture, as fractions of its width and height, so it
+/// does not depend on whether the daemon decodes a preview or a native frame.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Crop {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
@@ -115,6 +126,9 @@ pub struct Request {
     /// Raw RGBA annotation layer for the daemon to composite, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay_path: Option<String>,
+    /// The part of the capture to keep, if it was cropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crop: Option<Crop>,
 }
 
 impl Request {
@@ -129,6 +143,7 @@ impl Request {
             anchor: None,
             count: None,
             overlay_path: None,
+            crop: None,
         }
     }
 }

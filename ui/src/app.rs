@@ -18,7 +18,7 @@ use gpui::*;
 use crate::icons;
 use crate::ipc::{self, Client, RawImage, Reply};
 use crate::paint::{Brush, BrushKind, Paint, Point, Rgb, StrokeSession, from_srgb_hex};
-use crate::protocol::{ClipRange, Command, Request};
+use crate::protocol::{ClipRange, Command, Crop, Request};
 
 // MARK: - Geometry
 
@@ -95,7 +95,7 @@ const TOOLBAR_RADIUS: f32 = CONTROL_RADIUS + TOOLBAR_PADDING;
 const SLIDER_HEIGHT: f32 = 120.0;
 const COLOR_BUTTON: f32 = TOOLBAR_WIDTH;
 const SWATCH: f32 = 18.0;
-const TOOLS_HEIGHT: f32 = TOOLBAR_PADDING * 2.0 + TOOL_BUTTON * 2.0 + TOOL_SPACING;
+const TOOLS_HEIGHT: f32 = TOOLBAR_PADDING * 2.0 + TOOL_BUTTON * 3.0 + TOOL_SPACING * 2.0;
 const HISTORY_HEIGHT: f32 = TOOLS_HEIGHT;
 const WEIGHT_HEIGHT: f32 = TOOLBAR_PADDING * 2.0 + SLIDER_HEIGHT;
 const TOOLBAR_HEIGHT: f32 =
@@ -153,6 +153,30 @@ enum EdgeMode {
     First,
     Last,
 }
+
+/// Which corner of a crop a drag is pulling.
+#[derive(Clone, Copy, PartialEq)]
+enum CropHandle {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+/// What a press on the preview does in crop mode.
+#[derive(Clone, Copy)]
+enum CropDrag {
+    /// Laying a new rectangle from where the press began.
+    New { anchor: (f64, f64) },
+    /// Moving the rectangle as it was.
+    Move { anchor: (f64, f64), start: Crop },
+    /// Pulling one corner of the rectangle as it was.
+    Resize { handle: CropHandle, start: Crop },
+}
+
+/// How near a corner a press counts as grabbing it, in points.
+const CROP_HANDLE_REACH: f32 = 12.0;
+const MIN_CROP: f64 = 0.02;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Drag {
@@ -242,6 +266,14 @@ pub struct Rewind {
     weight_drag: Option<(f32, f32)>,
     /// The swatches beside the colour button are showing.
     colors_open: bool,
+    /// The part of the capture copied and exported, once applied.
+    crop: Option<Crop>,
+    /// Selecting a crop: the rectangle being dragged, and where the press
+    /// began.
+    crop_draft: Option<Crop>,
+    crop_drag: Option<CropDrag>,
+    /// Selecting a crop. Drawing is suspended while it is on.
+    cropping: bool,
     brush_color: Rgb,
     /// A swatch was picked. Until then the ink follows the system theme, which
     /// can change while the overlay stays resident.
@@ -310,6 +342,10 @@ impl Rewind {
             draw_eraser: false,
             weight_drag: None,
             colors_open: false,
+            crop: None,
+            crop_draft: None,
+            crop_drag: None,
+            cropping: false,
             brush_color: theme_ink(cx.window_appearance()),
             color_chosen: false,
             brush_width: DEFAULT_BRUSH_WIDTH,
@@ -383,6 +419,10 @@ impl Rewind {
         self.overlay = None;
         self.live_overlay = None;
         self.draw_eraser = false;
+        self.cropping = false;
+        self.crop = None;
+        self.crop_draft = None;
+        self.crop_drag = None;
         self.request_frame(cx);
         self.request_edge_frames(cx);
         self.request_estimate(cx);
@@ -652,7 +692,14 @@ impl Rewind {
     /// daemon from the ring without decoding anything.
     fn estimated_size(&self) -> String {
         if !self.paint.is_empty() {
-            return " · annotated".into();
+            return if self.crop.is_some() {
+                " · annotated · cropped".into()
+            } else {
+                " · annotated".into()
+            };
+        }
+        if self.crop.is_some() {
+            return " · cropped".into();
         }
         match self.estimated_bytes {
             Some(bytes) if bytes > 0 => format!(" · ~{:.1} MB", bytes as f64 / 1_048_576.0),
@@ -704,6 +751,165 @@ impl Rewind {
 
     fn select_eraser(&mut self, eraser: bool, cx: &mut Context<Self>) {
         self.draw_eraser = eraser;
+        self.cropping = false;
+        cx.notify();
+    }
+
+    // MARK: - Cropping
+
+    /// Starts editing the crop. There is no rectangle until one is drawn, and
+    /// an applied crop comes back for moving or resizing.
+    fn begin_crop(&mut self, cx: &mut Context<Self>) {
+        self.cropping = true;
+        self.colors_open = false;
+        self.crop_drag = None;
+        self.crop_draft = self.crop;
+        cx.notify();
+    }
+
+    /// A window-space pointer as fractions of the preview.
+    fn normalised_point(&self, x: f32, y: f32) -> (f64, f64) {
+        let (left, top, width, height) = self.stage_image;
+        (
+            ((x - left) / width.max(1.0)).clamp(0.0, 1.0) as f64,
+            ((y - top) / height.max(1.0)).clamp(0.0, 1.0) as f64,
+        )
+    }
+
+    /// The corner of `crop` within reach of the pointer, in preview points.
+    fn crop_handle_at(&self, crop: Crop, x: f64, y: f64) -> Option<CropHandle> {
+        let (width, height) = (self.stage_image.2 as f64, self.stage_image.3 as f64);
+        let reach = CROP_HANDLE_REACH as f64;
+        [
+            (CropHandle::TopLeft, crop.x, crop.y),
+            (CropHandle::TopRight, crop.x + crop.width, crop.y),
+            (CropHandle::BottomLeft, crop.x, crop.y + crop.height),
+            (CropHandle::BottomRight, crop.x + crop.width, crop.y + crop.height),
+        ]
+        .into_iter()
+        .find(|(_, cx, cy)| {
+            let (dx, dy) = (x * width - cx * width, y * height - cy * height);
+            (dx * dx + dy * dy).sqrt() <= reach
+        })
+        .map(|(handle, _, _)| handle)
+    }
+
+    fn crop_down(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        let (x, y) = self.normalised_point(x, y);
+        if let Some(crop) = self.crop_draft {
+            if let Some(handle) = self.crop_handle_at(crop, x, y) {
+                self.crop_drag = Some(CropDrag::Resize { handle, start: crop });
+                cx.notify();
+                return;
+            }
+            let inside = x >= crop.x
+                && x <= crop.x + crop.width
+                && y >= crop.y
+                && y <= crop.y + crop.height;
+            if inside {
+                self.crop_drag = Some(CropDrag::Move {
+                    anchor: (x, y),
+                    start: crop,
+                });
+                cx.notify();
+                return;
+            }
+        }
+        self.crop_drag = Some(CropDrag::New { anchor: (x, y) });
+        self.crop_draft = Some(Crop {
+            x,
+            y,
+            width: 0.0,
+            height: 0.0,
+        });
+        cx.notify();
+    }
+
+    fn crop_move(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        let Some(drag) = self.crop_drag else {
+            return;
+        };
+        let (x, y) = self.normalised_point(x, y);
+        self.crop_draft = Some(match drag {
+            CropDrag::New { anchor } => Crop {
+                x: anchor.0.min(x),
+                y: anchor.1.min(y),
+                width: (x - anchor.0).abs(),
+                height: (y - anchor.1).abs(),
+            },
+            CropDrag::Move { anchor, start } => Crop {
+                x: (start.x + x - anchor.0).clamp(0.0, 1.0 - start.width),
+                y: (start.y + y - anchor.1).clamp(0.0, 1.0 - start.height),
+                ..start
+            },
+            CropDrag::Resize { handle, start } => {
+                let (mut left, mut top) = (start.x, start.y);
+                let (mut right, mut bottom) = (start.x + start.width, start.y + start.height);
+                match handle {
+                    CropHandle::TopLeft => {
+                        left = x.min(right - MIN_CROP);
+                        top = y.min(bottom - MIN_CROP);
+                    }
+                    CropHandle::TopRight => {
+                        right = x.max(left + MIN_CROP);
+                        top = y.min(bottom - MIN_CROP);
+                    }
+                    CropHandle::BottomLeft => {
+                        left = x.min(right - MIN_CROP);
+                        bottom = y.max(top + MIN_CROP);
+                    }
+                    CropHandle::BottomRight => {
+                        right = x.max(left + MIN_CROP);
+                        bottom = y.max(top + MIN_CROP);
+                    }
+                }
+                let (left, right) = (left.clamp(0.0, 1.0), right.clamp(0.0, 1.0));
+                let (top, bottom) = (top.clamp(0.0, 1.0), bottom.clamp(0.0, 1.0));
+                Crop {
+                    x: left,
+                    y: top,
+                    width: right - left,
+                    height: bottom - top,
+                }
+            }
+        });
+        cx.notify();
+    }
+
+    /// A press that never moved is not a crop; the rectangle that was there
+    /// before it stays.
+    fn crop_up(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.crop_drag, Some(CropDrag::New { .. }))
+            && self
+                .crop_draft
+                .is_some_and(|crop| crop.width < MIN_CROP || crop.height < MIN_CROP)
+        {
+            self.crop_draft = self.crop;
+        }
+        self.crop_drag = None;
+        cx.notify();
+    }
+
+    fn apply_crop(&mut self, cx: &mut Context<Self>) {
+        self.crop = self
+            .crop_draft
+            .filter(|crop| crop.width >= MIN_CROP && crop.height >= MIN_CROP);
+        self.cropping = false;
+        self.crop_drag = None;
+        cx.notify();
+    }
+
+    fn cancel_crop(&mut self, cx: &mut Context<Self>) {
+        self.cropping = false;
+        self.crop_drag = None;
+        self.crop_draft = self.crop;
+        cx.notify();
+    }
+
+    fn reset_crop(&mut self, cx: &mut Context<Self>) {
+        self.crop = None;
+        self.crop_draft = None;
+        self.crop_drag = None;
         cx.notify();
     }
 
@@ -1116,6 +1322,7 @@ impl Rewind {
         let client = self.client.clone();
         let annotations = (!self.paint.is_empty()).then(|| self.paint.clone());
         let size = self.export_size();
+        let crop = self.crop;
 
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -1132,6 +1339,7 @@ impl Rewind {
                     request.overlay_path = overlay
                         .as_ref()
                         .map(|path| path.to_string_lossy().into_owned());
+                    request.crop = crop;
                     let result = ipc::call(&client, request).map_err(|error| error.to_string());
                     if let Some(path) = overlay {
                         let _ = std::fs::remove_file(path);
@@ -1256,6 +1464,7 @@ impl Rewind {
         // made the overlay sit there for half a second after Escape.
         let annotations = (!self.paint.is_empty()).then(|| self.paint.clone());
         let size = self.export_size();
+        let crop = self.crop;
         self.hide(cx);
         let seconds = self.playhead;
         let anchor = self.anchor;
@@ -1272,6 +1481,7 @@ impl Rewind {
                     request.overlay_path = overlay
                         .as_ref()
                         .map(|path| path.to_string_lossy().into_owned());
+                    request.crop = crop;
                     let result = ipc::call(&client, request).map_err(|error| error.to_string());
                     if let Some(path) = overlay {
                         let _ = std::fs::remove_file(path);
@@ -1315,6 +1525,15 @@ impl Rewind {
     /// | ⌘C             | copy the range as a video file         |
     /// | Esc            | close                                  |
     fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.cropping {
+            match event.keystroke.key.as_str() {
+                "escape" => self.cancel_crop(cx),
+                "enter" => self.apply_crop(cx),
+                _ => return,
+            }
+            cx.stop_propagation();
+            return;
+        }
         let modifiers = &event.keystroke.modifiers;
         let frame = 1.0 / self.fps;
         let step = if modifiers.shift { 1.0 } else { frame };
@@ -1623,14 +1842,51 @@ impl Render for Rewind {
                                     ),
                             )
                         })
+                        .when_some(crop_view(self.cropping, self.crop, self.crop_draft), |this, crop| {
+                            let x0 = crop.x as f32 * image_width;
+                            let y0 = crop.y as f32 * image_height;
+                            let w = crop.width as f32 * image_width;
+                            let h = crop.height as f32 * image_height;
+                            let shade = rgba(0x08080CB0);
+                            let mut view = this
+                                .child(shade_rect(0.0, 0.0, image_width, y0, shade))
+                                .child(shade_rect(0.0, y0 + h, image_width, image_height - y0 - h, shade))
+                                .child(shade_rect(0.0, y0, x0, h, shade))
+                                .child(shade_rect(x0 + w, y0, image_width - x0 - w, h, shade))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(x0))
+                                        .top(px(y0))
+                                        .w(px(w))
+                                        .h(px(h))
+                                        .border_2()
+                                        .border_color(rgba(0xFFFFFFFF)),
+                                );
+                            if self.cropping {
+                                for (hx, hy) in [(x0, y0), (x0 + w, y0), (x0, y0 + h), (x0 + w, y0 + h)] {
+                                    view = view.child(
+                                        div()
+                                            .absolute()
+                                            .left(px(hx - 4.0))
+                                            .top(px(hy - 4.0))
+                                            .size(px(8.0))
+                                            .rounded_full()
+                                            .bg(rgba(0xFFFFFFFF)),
+                                    );
+                                }
+                            }
+                            view
+                        })
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|view, event: &MouseDownEvent, _window, cx| {
-                                view.draw_begin(
-                                    event.position.x.into(),
-                                    event.position.y.into(),
-                                    cx,
-                                )
+                                let (x, y) = (event.position.x.into(), event.position.y.into());
+                                if view.cropping {
+                                    view.crop_down(x, y, cx);
+                                } else {
+                                    view.draw_begin(x, y, cx);
+                                }
                             }),
                         )
                         .into_any_element()
@@ -1667,6 +1923,7 @@ impl Render for Rewind {
         // from below.
         let toolbar_left = MARGIN - (1.0 - bar_progress) * (TOOLBAR_WIDTH + MARGIN * 2.0);
         let palette = self.brush_palette(toolbar_left, toolbar_top, cx);
+        let crop_pill = self.cropping.then(|| self.crop_actions(bar_top, cx));
 
         // Moves and releases are handled on the root, which covers the whole
         // window, so a drag keeps tracking after the pointer leaves the bar.
@@ -1682,6 +1939,8 @@ impl Render for Rewind {
                     if event.pressed_button == Some(MouseButton::Left) {
                         if view.weight_drag.is_some() {
                             view.drag_weight(event.position.y.into(), cx);
+                        } else if view.cropping && view.crop_drag.is_some() {
+                            view.crop_move(event.position.x.into(), event.position.y.into(), cx);
                         } else if view.live.is_some() {
                             view.draw_move(event.position.x.into(), event.position.y.into(), cx);
                         } else if view.drag.is_some() {
@@ -1701,6 +1960,10 @@ impl Render for Rewind {
                     if view.weight_drag.take().is_some() {
                         return;
                     }
+                    if view.cropping {
+                        view.crop_up(cx);
+                        return;
+                    }
                     if view.live.is_some() {
                         view.finish_stroke(cx);
                         return;
@@ -1714,6 +1977,7 @@ impl Render for Rewind {
                 }),
             )
             .child(stage)
+            .when_some(crop_pill, |this, pill| this.child(pill))
             .child(palette)
             .child(self.transport_bar(
                 bar_top,
@@ -1734,12 +1998,55 @@ impl Render for Rewind {
 // MARK: - The bar
 
 impl Rewind {
+    /// The Apply / Cancel pill while a crop is being selected.
+    fn crop_actions(&self, bar_top: f32, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .absolute()
+            .left(px(0.0))
+            .right(px(0.0))
+            .top(px(bar_top - GAP - 38.0))
+            .flex()
+            .justify_center()
+            .child(
+                panel()
+                    .h(px(38.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .px(px(6.0))
+                            .text_xs()
+                            .text_color(rgba(MUTED))
+                            .child("Crop"),
+                    )
+                    .child(label_button("Reset").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                            view.reset_crop(cx)
+                        }),
+                    ))
+                    .child(secondary_button("Cancel", "Esc", false).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                            view.cancel_crop(cx)
+                        }),
+                    ))
+                    .child(primary_button("Apply", "Enter", false).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _: &MouseDownEvent, _window, cx| view.apply_crop(cx)),
+                    )),
+            )
+            .into_any_element()
+    }
+
     /// The drawing toolbar: separate pills for the tools, history, weight and
     /// colour, stacked down the left edge.
     fn brush_palette(&self, left: f32, top: f32, cx: &mut Context<Self>) -> AnyElement {
         let tools = toolbar_pill()
             .child(
-                tool_button(icons::PEN, !self.draw_eraser, true).on_mouse_down(
+                tool_button(icons::PEN, !self.draw_eraser && !self.cropping, true).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|view, _: &MouseDownEvent, _window, cx| {
                         view.select_eraser(false, cx)
@@ -1747,11 +2054,17 @@ impl Rewind {
                 ),
             )
             .child(
-                tool_button(icons::ERASER, self.draw_eraser, true).on_mouse_down(
+                tool_button(icons::ERASER, self.draw_eraser && !self.cropping, true).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|view, _: &MouseDownEvent, _window, cx| {
                         view.select_eraser(true, cx)
                     }),
+                ),
+            )
+            .child(
+                tool_button(icons::CROP, self.cropping, true).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _: &MouseDownEvent, _window, cx| view.begin_crop(cx)),
                 ),
             );
 
@@ -2298,6 +2611,23 @@ fn group() -> Div {
 }
 
 /// One pill of the drawing toolbar.
+/// Which rectangle the stage should shade: the one being dragged while
+/// cropping, otherwise the applied crop.
+fn crop_view(cropping: bool, crop: Option<Crop>, draft: Option<Crop>) -> Option<Crop> {
+    if cropping { draft } else { crop }
+}
+
+/// One of the four panes that dim everything outside the crop.
+fn shade_rect(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> Div {
+    div()
+        .absolute()
+        .left(px(x))
+        .top(px(y))
+        .w(px(width.max(0.0)))
+        .h(px(height.max(0.0)))
+        .bg(color)
+}
+
 fn toolbar_pill() -> Div {
     div()
         .w(px(TOOLBAR_WIDTH))

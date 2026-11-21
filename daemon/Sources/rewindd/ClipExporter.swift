@@ -2,6 +2,7 @@ import AVFoundation
 import CoreImage
 import CoreMedia
 import Foundation
+import RewindKit
 
 enum ClipExportError: Error, CustomStringConvertible {
     case emptyClip
@@ -89,12 +90,13 @@ enum ClipExporter {
         }
     }
 
-    /// Burns a static annotation layer into the clip. Export with annotations
-    /// has to re-encode, so the untouched clip is muxed first and then passed
-    /// through a Core Image video composition.
-    static func writeAnnotated(
+    /// Burns annotations in and/or crops the clip. Either needs a re-encode, so
+    /// the untouched clip is muxed first and then passed through a Core Image
+    /// video composition.
+    static func writeComposed(
         frames: [CMSampleBuffer],
-        overlay: AnnotationOverlay,
+        overlay: AnnotationOverlay?,
+        crop: Crop?,
         to url: URL
     ) async throws -> ExportResult {
         let temporary = FileManager.default.temporaryDirectory
@@ -103,17 +105,41 @@ enum ClipExporter {
 
         let raw = try write(frames: frames, to: temporary)
         let asset = AVURLAsset(url: raw.url)
-        let annotation = CIImage(cgImage: try overlay.cgImage())
+        let annotation = try overlay.map { CIImage(cgImage: try $0.cgImage()) }
 
         let composition = AVMutableVideoComposition(asset: asset) { request in
             let source = request.sourceImage
-            let scaleX = source.extent.width / annotation.extent.width
-            let scaleY = source.extent.height / annotation.extent.height
-            let scaled = annotation
-                .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
-                .composited(over: source)
-                .cropped(to: source.extent)
-            request.finish(with: scaled, context: nil)
+            var image = source
+            if let annotation {
+                let scaleX = source.extent.width / annotation.extent.width
+                let scaleY = source.extent.height / annotation.extent.height
+                image = annotation
+                    .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+                    .composited(over: source)
+                    .cropped(to: source.extent)
+            }
+            if let crop {
+                // Core Image's origin is bottom-left; the crop is measured from
+                // the top, like the pointer that drew it.
+                let rect = crop.pixels(width: Int(source.extent.width), height: Int(source.extent.height))
+                let inImage = CGRect(
+                    x: rect.origin.x,
+                    y: source.extent.height - rect.maxY,
+                    width: rect.width,
+                    height: rect.height
+                )
+                image = image
+                    .cropped(to: inImage)
+                    .transformed(by: CGAffineTransform(translationX: -inImage.minX, y: -inImage.minY))
+            }
+            request.finish(with: image, context: nil)
+        }
+        if let crop {
+            let rect = crop.pixels(
+                width: Int(composition.renderSize.width),
+                height: Int(composition.renderSize.height)
+            )
+            composition.renderSize = CGSize(width: rect.width, height: rect.height)
         }
 
         guard let session = AVAssetExportSession(

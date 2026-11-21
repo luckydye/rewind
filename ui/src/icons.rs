@@ -11,6 +11,7 @@ pub const PEN: &str = "icons/pen.svg";
 pub const ERASER: &str = "icons/eraser.svg";
 pub const UNDO: &str = "icons/undo.svg";
 pub const REDO: &str = "icons/redo.svg";
+pub const CROP: &str = "icons/crop.svg";
 
 const OPEN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">"#;
 
@@ -35,12 +36,15 @@ impl AssetSource for Icons {
             REDO => {
                 r#"<path d="m15 14 5-5-5-5"/><path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5A5.5 5.5 0 0 0 9.5 20H13"/>"#
             }
+            CROP => {
+                r#"<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>"#
+            }
             _ => return Ok(None),
         };
         Ok(Some(Cow::Owned(icon(paths))))
     }
 
     fn list(&self, _path: &str) -> Result<Vec<SharedString>> {
-        Ok([PEN, ERASER, UNDO, REDO].map(SharedString::from).to_vec())
+        Ok([PEN, ERASER, UNDO, REDO, CROP].map(SharedString::from).to_vec())
     }
 }

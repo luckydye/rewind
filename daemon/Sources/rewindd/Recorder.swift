@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreMedia
 import Foundation
 import RewindKit
@@ -137,19 +138,21 @@ actor Recorder {
         to: Double,
         path: String?,
         anchor: Double? = nil,
-        overlayPath: String? = nil
+        overlayPath: String? = nil,
+        crop: Crop? = nil
     ) async throws -> Clip {
         guard let ring, let encoder else { throw RecorderError.notRecording }
         let snapshot = try ring.snapshot(from: from, to: to, anchor: anchor)
         let url = path.map { URL(fileURLWithPath: $0) } ?? Self.newClipURL()
 
         let result: ExportResult
-        if let overlayPath {
-            let overlay = try AnnotationOverlay.load(overlayPath)
+        let overlay = try overlayPath.map(AnnotationOverlay.load)
+        if overlay != nil || crop != nil {
             result = try await Task.detached {
-                try await ClipExporter.writeAnnotated(
+                try await ClipExporter.writeComposed(
                     frames: snapshot.frames,
                     overlay: overlay,
+                    crop: crop,
                     to: url
                 )
             }.value
@@ -159,13 +162,15 @@ actor Recorder {
             }.value
         }
 
+        let size = try Self.pixelSize(of: result.url)
+
         return Clip(
             path: result.url.path,
             duration: result.duration,
             bytes: result.bytes,
             frames: snapshot.frames.count,
-            width: encoder.width,
-            height: encoder.height
+            width: size.0,
+            height: size.1
         )
     }
 
@@ -176,6 +181,15 @@ actor Recorder {
         let now = anchor ?? last.presentationTimeStamp.seconds
         let index = Self.frameIndex(at: now - secondsAgo, frames: snapshot.frames)
         return try previews.frame(frames: snapshot.frames, index: index, width: width)
+    }
+
+    /// Encoded size of a clip, which a crop can change.
+    private static func pixelSize(of url: URL) throws -> (Int, Int) {
+        let asset = AVURLAsset(url: url)
+        guard let track = asset.tracks(withMediaType: .video).first else {
+            return (0, 0)
+        }
+        return (Int(abs(track.naturalSize.width)), Int(abs(track.naturalSize.height)))
     }
 
     /// Keyframes are at most a second apart, so walking back a few steps is
