@@ -96,6 +96,13 @@ const GROUP: u32 = 0xFFFFFF0A;
 const DANGER: u32 = 0xFF5A4DFF;
 const PENDING: u32 = 0xF0A030FF;
 
+/// Which action is currently rendering, so only that button says it is busy.
+#[derive(Clone, Copy, PartialEq)]
+enum Busy {
+    Export,
+    Copy,
+}
+
 /// What dismissing the overlay puts on the clipboard.
 #[derive(Clone, Copy, PartialEq)]
 enum CloseCopy {
@@ -173,7 +180,7 @@ pub struct Rewind {
     requested: Option<f64>,
     in_flight: bool,
     drag: Option<Drag>,
-    exporting: bool,
+    busy: Option<Busy>,
     status: Option<Status>,
     ticker: Option<Task<()>>,
     /// Wall clock of the previous playback tick. Advance is derived from the
@@ -186,6 +193,11 @@ pub struct Rewind {
     /// Bumped whenever a close starts or the overlay is shown again, so a copy
     /// that finishes late cannot hide an overlay the user has reopened.
     close_generation: u64,
+    /// Remaining attempts to take keyboard focus after showing. Focus has to be
+    /// re-asserted from a render, the only place a `Window` is available, but
+    /// doing that unconditionally invalidates the window every frame and pins a
+    /// core. Bounded, it recovers from a previous app holding focus and stops.
+    focus_until: Option<Instant>,
     closing: bool,
     /// The last copy failed; the next close hides without trying again, so a
     /// dead daemon cannot trap the user in the overlay.
@@ -219,13 +231,14 @@ impl Rewind {
             requested: None,
             in_flight: false,
             drag: None,
-            exporting: false,
+            busy: None,
             status: None,
             ticker: None,
             playback_clock: None,
             close_copy: CloseCopy::Image,
             close_generation: 0,
             last_clip: None,
+            focus_until: None,
             closing: false,
             copy_failed: false,
         }
@@ -305,16 +318,34 @@ impl Rewind {
         crate::activate::start_fade();
 
         self.refresh(cx);
-        // Activation races window ordering and is sometimes dropped; asserting
-        // it once more shortly after makes the overlay reliably take the keys.
-        cx.spawn(async move |_, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(120))
-                .await;
-            crate::activate::activate();
+        // Activation races window ordering and is often dropped. Re-asserting it
+        // is not enough on its own: the focus retry lives in `render`, which only
+        // runs when something asks for a frame, so nudge a few renders too and
+        // stop as soon as focus sticks.
+        cx.spawn(async move |this, cx| {
+            for _ in 0..12 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(120))
+                    .await;
+                crate::activate::activate();
+                let settled = this
+                    .update(cx, |view, cx| {
+                        cx.notify();
+                        view.focus_until.is_none()
+                    })
+                    .unwrap_or(true);
+                if settled {
+                    break;
+                }
+            }
         })
         .detach();
 
+        // Another app may still hold activation; the retry is bounded.
+        // Another app may still hold activation, and taking focus is what makes
+        // the keys land here. Bounded by time rather than by a render count,
+        // which can all elapse before the window is key-able.
+        self.focus_until = Some(Instant::now() + Duration::from_millis(1500));
         // Full bleed until the first frame arrives; `received` starts the morph
         // so it never animates a placeholder.
         self.progress = 0.0;
@@ -748,7 +779,7 @@ impl Rewind {
 
     fn render_clip_then(&mut self, copy: bool, close_after: bool, cx: &mut Context<Self>) {
         let generation = self.close_generation;
-        if self.exporting {
+        if self.busy.is_some() {
             return;
         }
         if self.selection_duration() < 0.05 {
@@ -757,7 +788,7 @@ impl Rewind {
             return;
         }
 
-        self.exporting = true;
+        self.busy = Some(if copy { Busy::Copy } else { Busy::Export });
         self.stop_playback();
         self.status = Some(Status::Info("rendering…".into()));
 
@@ -784,7 +815,7 @@ impl Rewind {
                 .await;
 
             this.update(cx, |view, cx| {
-                view.exporting = false;
+                view.busy = None;
                 if close_after {
                     match &result {
                         Ok(_) => {
@@ -953,6 +984,7 @@ impl Rewind {
             "space" => self.toggle_play(cx),
             // Enter copies whatever the switch says and dismisses; Escape just
             // dismisses.
+            "enter" if modifiers.platform => self.export(cx),
             "enter" => self.close(cx),
             "c" if modifiers.platform => self.copy_clip(cx),
             "left" if modifiers.alt => self.shift_range(1.0, cx),
@@ -1098,10 +1130,14 @@ impl Render for Rewind {
         // Nothing else in the overlay is focusable, and the window can lose key
         // status when another app activates itself, which silently drops Space,
         // Enter and Escape. Re-assert focus on every frame.
-        // Focus is asserted in `show`, not here: calling `window.focus` from a
-        // render invalidates the window, which schedules another render, which
-        // focuses again — a 60 fps repaint loop that burned ~30% of a core
-        // while the overlay sat idle.
+        if let Some(until) = self.focus_until {
+            if self.focus.is_focused(window) || Instant::now() >= until {
+                self.focus_until = None;
+            } else {
+                window.focus(&self.focus);
+            }
+        }
+
 
         let viewport = window.viewport_size();
         let width: f32 = viewport.width.into();
@@ -1345,10 +1381,12 @@ impl Rewind {
                 ),
             );
 
-        let secondary = label_button("Copy").on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|view, _: &MouseDownEvent, _window, cx| view.copy_clip(cx)),
-        );
+        let secondary = secondary_button("Copy", "Enter", self.busy == Some(Busy::Copy))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.copy_clip(cx)),
+            )
+            ;
 
         let right = div()
             .absolute()
@@ -1358,26 +1396,15 @@ impl Rewind {
             .flex()
             .items_center()
             .gap(px(4.0))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgba(MUTED))
-                            .child("Enter copies"),
-                    )
-                    .child(close_switch),
-            )
+            .child(close_switch)
             .child(secondary)
             .child(
-                primary_button(if self.exporting { "Exporting…" } else { "Export" })
-                    .on_mouse_down(
+                primary_button("Export", "⌘Enter", self.busy == Some(Busy::Export))
+                            .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|view, _: &MouseDownEvent, _window, cx| view.export(cx)),
-                    ),
+                    )
+                    ,
             )
             .child(icon_button("✕").on_mouse_down(
                 MouseButton::Left,
@@ -1661,19 +1688,47 @@ fn segment(label: &'static str, active: bool) -> Div {
 
 /// The one primary action. A tinted accent rather than a solid fill: a full
 /// strength blue block at this size dominated the whole bar.
-fn primary_button(label: &'static str) -> Div {
+/// The secondary of the pair: neutral, same box as the primary.
+fn secondary_button(label: &'static str, shortcut: &'static str, busy: bool) -> Div {
     div()
         .h(px(CONTROL_H))
         .px(px(CONTROL_PADDING))
         .rounded(px(CONTROL_RADIUS))
-        .bg(rgba(0x2F7CF63D))
+        .bg(rgba(if busy { 0xFFFFFF1F } else { 0xFFFFFF12 }))
+        .flex()
+        .items_center()
+        .text_xs()
+        .text_color(rgba(TEXT))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(0xFFFFFF20)))
+        .child(button_label(label, shortcut, MUTED))
+}
+
+/// The primary-weight button. `busy` keeps its label and shows progress on the
+/// button that was actually pressed.
+fn primary_button(label: &'static str, shortcut: &'static str, busy: bool) -> Div {
+    div()
+        .h(px(CONTROL_H))
+        .px(px(CONTROL_PADDING))
+        .rounded(px(CONTROL_RADIUS))
+        .bg(rgba(if busy { 0x2F7CF666 } else { 0x2F7CF63D }))
         .flex()
         .items_center()
         .text_xs()
         .text_color(rgba(0x7FB2FFFF))
         .cursor_pointer()
         .hover(|style| style.bg(rgba(0x2F7CF659)))
+        .child(button_label(label, shortcut, 0x7FB2FF99))
+}
+
+/// Label plus its shortcut, the shortcut a step quieter.
+fn button_label(label: &'static str, shortcut: &'static str, hint: u32) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(7.0))
         .child(label)
+        .child(div().text_color(rgba(hint)).child(shortcut))
 }
 
 fn label_button(label: &'static str) -> Div {

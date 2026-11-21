@@ -72,7 +72,12 @@ pub fn hide() {
 pub fn activate() {
     unsafe {
         let send: SendObject = std::mem::transmute(objc_msgSend as *const ());
-        send(shared_application(), selector(c"unhideWithoutActivation"));
+        let unhide: SendPointer = std::mem::transmute(objc_msgSend as *const ());
+        unhide(
+            shared_application(),
+            selector(c"unhideWithoutActivation"),
+            std::ptr::null_mut(),
+        );
         send(shared_application(), selector(c"activate"));
 
         // Ordering the window front after activating closes the race where
