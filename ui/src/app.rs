@@ -41,6 +41,7 @@ const TOOLBAR_Y: f32 = 6.0;
 const CONTROL_H: f32 = 26.0;
 const GROUP_H: f32 = 30.0;
 const CONTROL_RADIUS: f32 = 8.0;
+const CONTROL_PADDING: f32 = 14.0;
 
 /// Ruler: bare numbers on the panel, with the playhead badge riding on it.
 const RULER_Y: f32 = 38.0;
@@ -1344,10 +1345,10 @@ impl Rewind {
                 ),
             );
 
-        let secondary = group().child(label_button("Copy").on_mouse_down(
+        let secondary = label_button("Copy").on_mouse_down(
             MouseButton::Left,
             cx.listener(|view, _: &MouseDownEvent, _window, cx| view.copy_clip(cx)),
-        ));
+        );
 
         let right = div()
             .absolute()
@@ -1663,13 +1664,12 @@ fn segment(label: &'static str, active: bool) -> Div {
 fn primary_button(label: &'static str) -> Div {
     div()
         .h(px(CONTROL_H))
-        .px(px(14.0))
+        .px(px(CONTROL_PADDING))
         .rounded(px(CONTROL_RADIUS))
         .bg(rgba(0x2F7CF63D))
         .flex()
         .items_center()
         .text_xs()
-        .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgba(0x7FB2FFFF))
         .cursor_pointer()
         .hover(|style| style.bg(rgba(0x2F7CF659)))
@@ -1679,7 +1679,7 @@ fn primary_button(label: &'static str) -> Div {
 fn label_button(label: &'static str) -> Div {
     div()
         .h(px(CONTROL_H))
-        .px(px(12.0))
+        .px(px(CONTROL_PADDING))
         .rounded(px(CONTROL_RADIUS))
         .flex()
         .items_center()
