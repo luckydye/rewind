@@ -972,6 +972,14 @@ impl Rewind {
         (scaled, scaled_height)
     }
 
+    /// While a stroke is under the pointer it is previewed at half resolution:
+    /// the area it covers is re-rasterised every event, and this quarters that
+    /// work. On release the stroke is rebuilt into the full layer.
+    fn live_size(&self) -> (u32, u32) {
+        let (width, height) = self.overlay_size();
+        ((width / 2).max(1), (height / 2).max(1))
+    }
+
     /// Native size of the capture, which is what the daemon composites against.
     fn export_size(&self) -> (u32, u32) {
         if self.native_size.0 > 0 && self.native_size.1 > 0 {
@@ -1021,7 +1029,7 @@ impl Rewind {
             self.rebuild_overlay(cx);
             return;
         }
-        let (width, height) = self.overlay_size();
+        let (width, height) = self.live_size();
         let Some(region) = live.render_region(width, height) else {
             return;
         };
@@ -1787,8 +1795,8 @@ impl Render for Rewind {
                 Some(image) => {
                     self.stage_image = (image_left, image_top, image_width, image_height);
                     let overlay = self.overlay.clone();
-                    // Annotation-layer pixels to stage points.
-                    let layer = self.overlay_size();
+                    // Live-layer pixels to stage points.
+                    let layer = self.live_size();
                     let live = self.live_overlay.clone().map(|(image, (x, y, w, h))| {
                         let sx = image_width / layer.0 as f32;
                         let sy = image_height / layer.1 as f32;
