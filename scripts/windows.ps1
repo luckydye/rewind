@@ -21,9 +21,21 @@ $target = Join-Path $env:LOCALAPPDATA "Programs\Rewind"
 
 function Stop-Rewind {
     # Ask politely first so the tray icon is removed, then make sure.
+    # Windows PowerShell turns a native command's stderr into an error record,
+    # which "Stop" makes fatal, so `quit` aborted the install whenever Rewind
+    # was not running and rewindctl reported that it could not reach it.
     $ctl = Join-Path $target "rewindctl.exe"
-    if (Test-Path $ctl) { & $ctl quit 2>$null | Out-Null; Start-Sleep -Milliseconds 800 }
-    Get-Process Rewind, rewindd, rewind-ui -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    if (Test-Path $ctl) {
+        $previous = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        & $ctl quit 2>&1 | Out-Null
+        $ErrorActionPreference = $previous
+        Start-Sleep -Milliseconds 800
+    }
+    $running = Get-Process Rewind, rewindd, rewind-ui -ErrorAction SilentlyContinue
+    $running | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Stop-Process returns before the process is gone, and its executable
+    # stays locked until then, so the copy that follows could fail.
+    $running | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
 }
 
 function Invoke-Cargo([string]$crate) {
@@ -53,9 +65,18 @@ switch ($Action) {
     "bundle" { Build-Bundle }
     "install" {
         Build-Bundle
-        Stop-Rewind
         New-Item -ItemType Directory -Force $target | Out-Null
-        Copy-Item (Join-Path $dist "*") $target -Force
+        # An executable can stay locked briefly after its process is gone, and
+        # the overlay can be relaunched while the daemon is shutting down, so
+        # stop and retry rather than fail on the first locked file.
+        for ($attempt = 1; ; $attempt++) {
+            Stop-Rewind
+            try { Copy-Item (Join-Path $dist "*") $target -Force; break }
+            catch [System.IO.IOException] {
+                if ($attempt -ge 10) { throw }
+                Start-Sleep -Milliseconds 500
+            }
+        }
         Write-Host "installed $target"
         & (Join-Path $target "rewindd.exe") login-item on
         Start-Process (Join-Path $target "Rewind.exe")
