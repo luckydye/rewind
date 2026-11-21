@@ -26,10 +26,8 @@ pub struct BrushMarkRequest {
 }
 
 pub fn create_brush_mark(request: BrushMarkRequest) -> BrushTip {
-    // Widths are normalised to the capture, so the floor is a tiny fraction of
-    // it rather than the half-world-unit floor used in canvas world space.
-    let start_radius = (request.start_width / 2.0).max(1e-6);
-    let end_radius = (request.end_width / 2.0).max(1e-6);
+    let start_radius = (request.start_width / 2.0).max(0.5);
+    let end_radius = (request.end_width / 2.0).max(0.5);
     BrushTip {
         start: request.start,
         end: request.end,
@@ -37,6 +35,6 @@ pub fn create_brush_mark(request: BrushMarkRequest) -> BrushTip {
         end_radius,
         start_density: request.density.clamp(0.0, 1.0),
         end_density: request.end_density.clamp(0.0, 1.0),
-        reach: start_radius.max(end_radius),
+        reach: start_radius.max(end_radius) + 0.5,
     }
 }

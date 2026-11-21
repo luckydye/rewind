@@ -1,5 +1,6 @@
 mod activate;
 mod app;
+mod icons;
 mod ipc;
 mod paint;
 mod protocol;

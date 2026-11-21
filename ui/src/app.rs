@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use gpui::prelude::*;
 use gpui::*;
 
+use crate::icons;
 use crate::ipc::{self, Client, RawImage, Reply};
 use crate::paint::{Brush, BrushKind, Paint, Point, Rgb, StrokeSession, from_srgb_hex};
 use crate::protocol::{ClipRange, Command, Request};
@@ -80,9 +81,25 @@ const THUMBNAIL_COUNT: i64 = 16;
 const THUMBNAIL_WIDTH: i64 = 160;
 const EDGE_FRAME_WIDTH: i64 = 640;
 
-/// The drawing toolbar floats down the left edge, over the capture.
-const TOOLBAR_WIDTH: f32 = 52.0;
+/// The drawing toolbar: a column of pills down the left edge, centred in the
+/// space above the transport bar. Laid out explicitly so the weight slider can
+/// turn a window-space pointer into a width.
+const TOOLBAR_PADDING: f32 = 4.0;
+/// Same control size, radius and spacing as the transport bar's buttons.
+const TOOL_BUTTON: f32 = CONTROL_H;
+const TOOL_ICON: f32 = 14.0;
+const TOOL_SPACING: f32 = 2.0;
+const TOOLBAR_WIDTH: f32 = TOOL_BUTTON + TOOLBAR_PADDING * 2.0;
+const TOOLBAR_GAP: f32 = GAP;
+const TOOLBAR_RADIUS: f32 = CONTROL_RADIUS + TOOLBAR_PADDING;
+const SLIDER_HEIGHT: f32 = 120.0;
+const COLOR_BUTTON: f32 = TOOLBAR_WIDTH;
 const SWATCH: f32 = 18.0;
+const TOOLS_HEIGHT: f32 = TOOLBAR_PADDING * 2.0 + TOOL_BUTTON * 2.0 + TOOL_SPACING;
+const HISTORY_HEIGHT: f32 = TOOLS_HEIGHT;
+const WEIGHT_HEIGHT: f32 = TOOLBAR_PADDING * 2.0 + SLIDER_HEIGHT;
+const TOOLBAR_HEIGHT: f32 =
+    TOOLS_HEIGHT + HISTORY_HEIGHT + WEIGHT_HEIGHT + COLOR_BUTTON + TOOLBAR_GAP * 3.0;
 const DEFAULT_BRUSH_WIDTH: f32 = 9.0;
 const MIN_BRUSH_WIDTH: f32 = 1.0;
 const MAX_BRUSH_WIDTH: f32 = 160.0;
@@ -212,9 +229,14 @@ pub struct Rewind {
     /// Bumped whenever a close starts or the overlay is shown again, so a copy
     /// that finishes late cannot hide an overlay the user has reopened.
     close_generation: u64,
-    /// Drawing mode: strokes are laid with the Ink brush instead of scrubbing.
-    draw_enabled: bool,
+    /// Which drawing tool is selected; the toolbar is always available.
     draw_eraser: bool,
+    /// The weight slider is being dragged: the pointer's window-space y when
+    /// the drag began, and the slider's position then. The slider follows the
+    /// pointer's movement rather than its position, so grabbing it never jumps.
+    weight_drag: Option<(f32, f32)>,
+    /// The swatches beside the colour button are showing.
+    colors_open: bool,
     brush_color: Rgb,
     brush_width: f32,
     /// Completed annotations and the stroke currently under the pointer, in
@@ -224,6 +246,9 @@ pub struct Rewind {
     live_started: Option<Instant>,
     /// The annotations, painted over the preview. Rebuilt when a stroke moves.
     overlay: Option<Arc<RenderImage>>,
+    /// The ink stroke under the pointer, rasterised over just the area it
+    /// covers and placed in annotation-layer pixels: x, y, width, height.
+    live_overlay: Option<(Arc<RenderImage>, (u32, u32, u32, u32))>,
     /// On-screen rect of the preview, in window coordinates, so a pointer can
     /// be mapped back onto the capture.
     stage_image: (f32, f32, f32, f32),
@@ -274,14 +299,16 @@ impl Rewind {
             playback_clock: None,
             close_copy: CloseCopy::Image,
             close_generation: 0,
-            draw_enabled: false,
             draw_eraser: false,
+            weight_drag: None,
+            colors_open: false,
             brush_color: from_srgb_hex(DRAW_COLORS[2]),
             brush_width: DEFAULT_BRUSH_WIDTH,
             paint: Paint::new(),
             live: None,
             live_started: None,
             overlay: None,
+            live_overlay: None,
             stage_image: (0.0, 0.0, 1.0, 1.0),
             native_size: (0, 0),
             last_clip: None,
@@ -345,7 +372,7 @@ impl Rewind {
         self.live = None;
         self.live_started = None;
         self.overlay = None;
-        self.draw_enabled = false;
+        self.live_overlay = None;
         self.draw_eraser = false;
         self.request_frame(cx);
         self.request_edge_frames(cx);
@@ -575,6 +602,9 @@ impl Rewind {
         if let Some(overlay) = self.overlay.take() {
             self.graveyard.push(overlay);
         }
+        if let Some((live, _)) = self.live_overlay.take() {
+            self.graveyard.push(live);
+        }
         for thumbnail in self.thumbnails.drain(..) {
             self.graveyard.push(thumbnail);
         }
@@ -660,18 +690,27 @@ impl Rewind {
 
     // MARK: - Drawing
 
-    fn toggle_draw(&mut self, cx: &mut Context<Self>) {
-        self.draw_enabled = !self.draw_enabled;
-        if !self.draw_enabled {
-            self.finish_stroke(cx);
-        }
+    fn select_eraser(&mut self, eraser: bool, cx: &mut Context<Self>) {
+        self.draw_eraser = eraser;
         cx.notify();
     }
 
-    fn select_eraser(&mut self, eraser: bool, cx: &mut Context<Self>) {
-        self.draw_eraser = eraser;
-        self.draw_enabled = true;
+    /// Moves the weight by how far the pointer travelled since the drag began:
+    /// the slider's full height spans the whole range. Logarithmic, so the
+    /// fine widths people annotate with get most of the travel.
+    fn drag_weight(&mut self, y: f32, cx: &mut Context<Self>) {
+        let Some((start_y, start_fraction)) = self.weight_drag else {
+            return;
+        };
+        let fraction = (start_fraction + (start_y - y) / SLIDER_HEIGHT).clamp(0.0, 1.0);
+        let (min, max) = (MIN_BRUSH_WIDTH.ln(), MAX_BRUSH_WIDTH.ln());
+        self.brush_width = (min + (max - min) * fraction).exp().round();
         cx.notify();
+    }
+
+    fn weight_fraction(&self) -> f32 {
+        let (min, max) = (MIN_BRUSH_WIDTH.ln(), MAX_BRUSH_WIDTH.ln());
+        ((self.brush_width.ln() - min) / (max - min)).clamp(0.0, 1.0)
     }
 
     fn nudge_brush_width(&mut self, direction: f32, cx: &mut Context<Self>) {
@@ -687,6 +726,7 @@ impl Rewind {
     fn undo_stroke(&mut self, cx: &mut Context<Self>) {
         if self.live.take().is_some() {
             self.live_started = None;
+            self.drop_live_overlay();
         } else {
             self.paint.undo();
         }
@@ -708,10 +748,10 @@ impl Rewind {
         } else {
             self.frame_size
         };
-        let width = width.min(PREVIEW_WIDTH as u32).max(1);
-        let height =
-            ((width as f64 * height.max(1) as f64 / width.max(1) as f64).round() as u32).max(1);
-        (width, height)
+        assert!(width > 0 && height > 0, "the capture has no size");
+        let scaled = width.min(PREVIEW_WIDTH as u32);
+        let scaled_height = ((scaled as f64 * height as f64 / width as f64).round() as u32).max(1);
+        (scaled, scaled_height)
     }
 
     /// Native size of the capture, which is what the daemon composites against.
@@ -723,8 +763,12 @@ impl Rewind {
         }
     }
 
+    /// The finished strokes. Rebuilt when they change, not per pointer move:
+    /// a full layer costs tens of milliseconds, and while the UI thread is
+    /// busy AppKit merges mouse events, which makes strokes coarse.
     fn rebuild_overlay(&mut self, cx: &mut Context<Self>) {
-        if self.paint.is_empty() && self.live.is_none() {
+        let erasing = self.live.as_ref().filter(|live| live.kind() == BrushKind::Eraser);
+        if self.paint.is_empty() && erasing.is_none() {
             if let Some(overlay) = self.overlay.take() {
                 self.graveyard.push(overlay);
             }
@@ -733,7 +777,7 @@ impl Rewind {
         }
 
         let (width, height) = self.overlay_size();
-        let pixels = self.paint.render_rgba(width, height, self.live.as_ref());
+        let pixels = self.paint.render_rgba(width, height, erasing);
         match build_image(RawImage {
             width,
             height,
@@ -749,53 +793,80 @@ impl Rewind {
         cx.notify();
     }
 
-    /// Maps a window-space pointer onto the capture: 0..1 across the frame.
-    fn normalised_point(&self, x: f32, y: f32) -> Option<(f64, f64)> {
-        let (left, top, width, height) = self.stage_image;
-        if width <= 0.0 || height <= 0.0 {
-            return None;
+    /// The stroke under the pointer. Ink only redraws the area it covers; an
+    /// eraser has to redraw the strokes it removes, so it rebuilds the layer.
+    fn rebuild_live(&mut self, cx: &mut Context<Self>) {
+        let Some(live) = self.live.as_ref() else {
+            return;
+        };
+        if live.kind() == BrushKind::Eraser {
+            self.rebuild_overlay(cx);
+            return;
         }
-        Some((
-            ((x - left) / width).clamp(0.0, 1.0) as f64,
-            ((y - top) / height).clamp(0.0, 1.0) as f64,
-        ))
+        let (width, height) = self.overlay_size();
+        let Some(region) = live.render_region(width, height) else {
+            return;
+        };
+        let rect = (region.x, region.y, region.width, region.height);
+        match build_image(RawImage {
+            width: region.width,
+            height: region.height,
+            pixels: region.pixels,
+        }) {
+            Ok(image) => {
+                if let Some((previous, _)) = self.live_overlay.replace((image, rect)) {
+                    self.graveyard.push(previous);
+                }
+            }
+            Err(message) => self.status = Some(Status::Error(message)),
+        }
+        cx.notify();
+    }
+
+    fn drop_live_overlay(&mut self) {
+        if let Some((live, _)) = self.live_overlay.take() {
+            self.graveyard.push(live);
+        }
+    }
+
+    /// Maps a window-space pointer onto the preview, in points from its
+    /// top-left corner. The brush dynamics are tuned in pointer units, so the
+    /// gesture runs in these and the stroke is scaled when it is rasterised.
+    fn stage_point(&self, x: f32, y: f32) -> (f64, f64) {
+        let (left, top, width, height) = self.stage_image;
+        (
+            (x - left).clamp(0.0, width) as f64,
+            (y - top).clamp(0.0, height) as f64,
+        )
     }
 
     fn draw_begin(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
-        if !self.draw_enabled || self.live.is_some() || self.frame.is_none() {
+        self.colors_open = false;
+        if self.live.is_some() || self.frame.is_none() || self.progress < 1.0 {
             return;
         }
-        let Some((nx, ny)) = self.normalised_point(x, y) else {
-            return;
-        };
-        let stage_width = self.stage_image.2.max(1.0) as f64;
-        let width = (self.brush_width as f64 / stage_width).clamp(
-            MIN_BRUSH_WIDTH as f64 / stage_width,
-            MAX_BRUSH_WIDTH as f64 / stage_width,
-        );
+        let (px, py) = self.stage_point(x, y);
         let kind = if self.draw_eraser {
             BrushKind::Eraser
         } else {
             BrushKind::Stroke
         };
-        let mut point = Point::at(nx, ny);
+        let mut point = Point::at(px, py);
         point.time = Some(0.0);
         self.stop_playback();
         self.live_started = Some(Instant::now());
         self.live = Some(StrokeSession::new(
             kind,
-            Brush::ink(width),
+            Brush::ink(self.brush_width as f64),
             self.brush_color,
             point,
-            1.0 / stage_width,
+            (self.stage_image.2 as f64, self.stage_image.3 as f64),
         ));
-        self.rebuild_overlay(cx);
+        self.rebuild_live(cx);
     }
 
     fn draw_move(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
-        let Some((nx, ny)) = self.normalised_point(x, y) else {
-            return;
-        };
+        let (px, py) = self.stage_point(x, y);
         let time = self
             .live_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
@@ -803,10 +874,10 @@ impl Rewind {
         let Some(live) = self.live.as_mut() else {
             return;
         };
-        let mut point = Point::at(nx, ny);
+        let mut point = Point::at(px, py);
         point.time = Some(time);
         live.push(&[point]);
-        self.rebuild_overlay(cx);
+        self.rebuild_live(cx);
     }
 
     fn finish_stroke(&mut self, cx: &mut Context<Self>) {
@@ -815,6 +886,7 @@ impl Rewind {
         };
         self.live_started = None;
         self.paint.push(live.finish());
+        self.drop_live_overlay();
         self.rebuild_overlay(cx);
     }
 
@@ -1263,7 +1335,7 @@ impl Rewind {
             "i" => self.mark_start(cx),
             "o" => self.mark_end(cx),
             "a" => self.reset_range(cx),
-            "b" => self.toggle_draw(cx),
+            "b" => self.select_eraser(false, cx),
             "e" => self.select_eraser(true, cx),
             "[" | "bracketleft" => self.nudge_brush_width(-1.0, cx),
             "]" | "bracketright" => self.nudge_brush_width(1.0, cx),
@@ -1481,6 +1553,13 @@ impl Render for Rewind {
                 Some(image) => {
                     self.stage_image = (image_left, image_top, image_width, image_height);
                     let overlay = self.overlay.clone();
+                    // Annotation-layer pixels to stage points.
+                    let layer = self.overlay_size();
+                    let live = self.live_overlay.clone().map(|(image, (x, y, w, h))| {
+                        let sx = image_width / layer.0 as f32;
+                        let sy = image_height / layer.1 as f32;
+                        (image, (x as f32 * sx, y as f32 * sy, w as f32 * sx, h as f32 * sy))
+                    });
                     div()
                         .absolute()
                         .left(px(image_left))
@@ -1493,6 +1572,7 @@ impl Render for Rewind {
                         .border_color(rgba(BORDER))
                         .child(
                             img(ImageSource::Render(image.clone()))
+                                .object_fit(ObjectFit::Fill)
                                 .w(px(image_width))
                                 .h(px(image_height)),
                         )
@@ -1506,8 +1586,25 @@ impl Render for Rewind {
                                     .h(px(image_height))
                                     .child(
                                         img(ImageSource::Render(overlay))
+                                            .object_fit(ObjectFit::Fill)
                                             .w(px(image_width))
                                             .h(px(image_height)),
+                                    ),
+                            )
+                        })
+                        .when_some(live, |this, (image, (x, y, w, h))| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .left(px(x))
+                                    .top(px(y))
+                                    .w(px(w))
+                                    .h(px(h))
+                                    .child(
+                                        img(ImageSource::Render(image))
+                                            .object_fit(ObjectFit::Fill)
+                                            .w(px(w))
+                                            .h(px(h)),
                                     ),
                             )
                         })
@@ -1549,9 +1646,9 @@ impl Render for Rewind {
             }
         };
 
-        let palette = self
-            .draw_enabled
-            .then(|| self.brush_palette(stage_top, cx));
+        // Centred in the space between the top inset and the transport bar.
+        let toolbar_top = stage_top + ((bar_top - GAP - stage_top) - TOOLBAR_HEIGHT).max(0.0) / 2.0;
+        let palette = self.brush_palette(toolbar_top, cx);
 
         // Moves and releases are handled on the root, which covers the whole
         // window, so a drag keeps tracking after the pointer leaves the bar.
@@ -1565,7 +1662,9 @@ impl Render for Rewind {
             .on_mouse_move(
                 cx.listener(move |view, event: &MouseMoveEvent, _window, cx| {
                     if event.pressed_button == Some(MouseButton::Left) {
-                        if view.live.is_some() {
+                        if view.weight_drag.is_some() {
+                            view.drag_weight(event.position.y.into(), cx);
+                        } else if view.live.is_some() {
                             view.draw_move(event.position.x.into(), event.position.y.into(), cx);
                         } else if view.drag.is_some() {
                             view.timeline_drag(
@@ -1581,6 +1680,9 @@ impl Render for Rewind {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|view, _: &MouseUpEvent, _window, cx| {
+                    if view.weight_drag.take().is_some() {
+                        return;
+                    }
                     if view.live.is_some() {
                         view.finish_stroke(cx);
                         return;
@@ -1594,7 +1696,7 @@ impl Render for Rewind {
                 }),
             )
             .child(stage)
-            .when_some(palette, |this, palette| this.child(palette))
+            .child(palette)
             .child(self.transport_bar(
                 bar_top,
                 bar_draw_top,
@@ -1614,124 +1716,196 @@ impl Render for Rewind {
 // MARK: - The bar
 
 impl Rewind {
-    /// The drawing toolbar, floating down the left edge so it never changes
-    /// the size or position of the capture.
+    /// The drawing toolbar: separate pills for the tools, history, weight and
+    /// colour, stacked down the left edge.
     fn brush_palette(&self, top: f32, cx: &mut Context<Self>) -> AnyElement {
-        let pen = icon_button("✎")
-            .text_color(rgba(if self.draw_eraser { MUTED } else { TEXT }))
-            .bg(rgba(if self.draw_eraser {
-                0x00000000
-            } else {
-                0xFFFFFF1F
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.select_eraser(false, cx)),
+        let tools = toolbar_pill()
+            .child(
+                tool_button(icons::PEN, !self.draw_eraser, true).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                        view.select_eraser(false, cx)
+                    }),
+                ),
+            )
+            .child(
+                tool_button(icons::ERASER, self.draw_eraser, true).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                        view.select_eraser(true, cx)
+                    }),
+                ),
             );
-        let eraser = icon_button("⌫")
-            .text_color(rgba(if self.draw_eraser { TEXT } else { MUTED }))
-            .bg(rgba(if self.draw_eraser {
-                0xFFFFFF1F
-            } else {
-                0x00000000
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.select_eraser(true, cx)),
-            );
-        let tools = vgroup().child(pen).child(eraser);
 
         let can_undo = self.live.is_some() || self.paint.can_undo();
         let can_redo = self.live.is_none() && self.paint.can_redo();
-        let history = vgroup()
-            .child(
-                icon_button("↶")
-                    .text_color(rgba(if can_undo { TEXT } else { MUTED }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, _: &MouseDownEvent, _window, cx| {
-                            view.undo_stroke(cx)
-                        }),
-                    ),
-            )
-            .child(
-                icon_button("↷")
-                    .text_color(rgba(if can_redo { TEXT } else { MUTED }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, _: &MouseDownEvent, _window, cx| {
-                            view.redo_stroke(cx)
-                        }),
-                    ),
-            );
-
-        let weight = vgroup()
-            .child(icon_button("+").on_mouse_down(
+        let history = toolbar_pill()
+            .child(tool_button(icons::UNDO, false, can_undo).on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|view, _: &MouseDownEvent, _window, cx| {
-                    view.nudge_brush_width(1.0, cx)
-                }),
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.undo_stroke(cx)),
             ))
-            .child(
-                div()
-                    .h(px(18.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_xs()
-                    .text_color(rgba(TEXT))
-                    .child(format!("{:.0}", self.brush_width)),
-            )
-            .child(icon_button("−").on_mouse_down(
+            .child(tool_button(icons::REDO, false, can_redo).on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|view, _: &MouseDownEvent, _window, cx| {
-                    view.nudge_brush_width(-1.0, cx)
-                }),
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.redo_stroke(cx)),
             ));
 
-        let mut colors = div().flex().flex_col().gap(px(4.0));
-        for pair in DRAW_COLORS.chunks(2) {
-            let mut row = div().flex().gap(px(4.0));
-            for hex in pair {
+        let fill = SLIDER_HEIGHT * self.weight_fraction();
+        let slider = div()
+            .relative()
+            .w(px(TOOL_BUTTON))
+            .h(px(SLIDER_HEIGHT))
+            .rounded(px(CONTROL_RADIUS))
+            .overflow_hidden()
+            .bg(rgba(SUNKEN))
+            .border_1()
+            .border_color(rgba(BORDER))
+            .cursor(CursorStyle::ResizeUpDown)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(0.0))
+                    .bottom(px(0.0))
+                    .w_full()
+                    .h(px(fill))
+                    // overflow_hidden clips to a rectangle, not the track's
+                    // rounded corners, so the fill rounds its own; its top
+                    // rounds too once it reaches the track's top curve.
+                    .rounded_b(px(CONTROL_RADIUS - 1.0))
+                    .when(fill > SLIDER_HEIGHT - CONTROL_RADIUS, |this| {
+                        this.rounded_t(px(CONTROL_RADIUS - 1.0))
+                    })
+                    .bg(rgba(0x5A5A62FF)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(6.0))
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .text_size(rems(0.625))
+                    .text_color(rgba(MUTED))
+                    .child(format!("{:.0}", self.brush_width)),
+            )
+            .child(
+                // The brush itself, at its real width up to what fits.
+                div()
+                    .absolute()
+                    .bottom(px(6.0))
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .size(px(self.brush_width.clamp(3.0, TOOL_BUTTON - 10.0)))
+                            .rounded_full()
+                            .bg(rgba(TEXT)),
+                    ),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, event: &MouseDownEvent, _window, _cx| {
+                    view.weight_drag = Some((event.position.y.into(), view.weight_fraction()));
+                }),
+            );
+        let weight = toolbar_pill().child(slider);
+
+        let (hex, _) = DRAW_COLORS
+            .iter()
+            .map(|hex| (*hex, from_srgb_hex(*hex)))
+            .find(|(_, color)| *color == self.brush_color)
+            .expect("the brush colour is one of the swatches");
+        let color = div()
+            .size(px(COLOR_BUTTON))
+            .rounded_full()
+            .bg(rgba(PANEL))
+            .border_1()
+            .border_color(rgba(BORDER))
+            .shadow_lg()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .child(
+                div()
+                    .size(px(COLOR_BUTTON - 2.0 * TOOLBAR_PADDING - 2.0))
+                    .rounded_full()
+                    .bg(rgba(hex << 8 | 0xFF))
+                    .border_1()
+                    .border_color(rgba(0xFFFFFF33)),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                    view.colors_open = !view.colors_open;
+                    cx.notify();
+                }),
+            );
+
+        let column = div()
+            .absolute()
+            .left(px(MARGIN))
+            .top(px(top))
+            .w(px(TOOLBAR_WIDTH))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(TOOLBAR_GAP))
+            .child(tools)
+            .child(history)
+            .child(weight)
+            .child(color)
+            // Runs after the buttons' own handlers and keeps the press from
+            // reaching the stage below. Occluding instead would also hide moves
+            // and releases from the root, which ends drags and strokes.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+
+        if !self.colors_open {
+            return column.into_any_element();
+        }
+
+        // The swatches open beside the colour button, two rows of four.
+        let mut swatches = panel()
+            .absolute()
+            .left(px(MARGIN + TOOLBAR_WIDTH + TOOLBAR_GAP))
+            .top(px(top + TOOLBAR_HEIGHT - COLOR_BUTTON - 4.0))
+            .p(px(TOOLBAR_PADDING + 4.0))
+            .rounded(px(TOOLBAR_RADIUS))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .flex()
+            .flex_col()
+            .gap(px(6.0));
+        for row in DRAW_COLORS.chunks(4) {
+            let mut line = div().flex().gap(px(6.0));
+            for hex in row {
                 let color = from_srgb_hex(*hex);
                 let selected = color == self.brush_color;
-                row = row.child(
+                line = line.child(
                     div()
                         .size(px(SWATCH))
                         .rounded_full()
                         .bg(rgba(*hex << 8 | 0xFF))
                         .border_2()
-                        .border_color(rgba(if selected { 0xFFFFFFFF } else { 0xFFFFFF33 }))
+                        .border_color(rgba(if selected { 0xFFFFFFFF } else { 0xFFFFFF26 }))
                         .cursor_pointer()
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |view, _: &MouseDownEvent, _window, cx| {
                                 view.brush_color = color;
+                                view.colors_open = false;
                                 cx.notify();
                             }),
                         ),
                 );
             }
-            colors = colors.child(row);
+            swatches = swatches.child(line);
         }
 
-        panel()
+        div()
             .absolute()
-            .left(px(MARGIN))
-            .top(px(top))
-            .w(px(TOOLBAR_WIDTH))
-            .p(px(6.0))
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(8.0))
-            .child(tools)
-            .child(rule())
-            .child(history)
-            .child(rule())
-            .child(weight)
-            .child(rule())
-            .child(colors)
+            .size_full()
+            .child(column)
+            .child(swatches)
             .into_any_element()
     }
 
@@ -1773,19 +1947,6 @@ impl Rewind {
                 cx.listener(|view, _: &MouseDownEvent, _window, cx| view.jump_to_end(cx)),
             ));
 
-        let draw = group().child(
-            icon_button("✎")
-                .bg(rgba(if self.draw_enabled {
-                    0xFFFFFF1F
-                } else {
-                    0x00000000
-                }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|view, _: &MouseDownEvent, _window, cx| view.toggle_draw(cx)),
-                ),
-        );
-
         let mut left = div()
             .absolute()
             .left(px(BAR_PADDING))
@@ -1795,7 +1956,6 @@ impl Rewind {
             .items_center()
             .gap(px(10.0))
             .child(transport)
-            .child(draw)
             .child(
                 div()
                     .text_xs()
@@ -1841,7 +2001,9 @@ impl Rewind {
         let secondary = secondary_button("Copy", "Enter", self.busy == Some(Busy::Copy))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.copy_clip(cx)),
+                // Same as Enter, whose shortcut it shows: copies what the
+                // Image / Video switch says, then closes.
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.close(cx)),
             );
 
         let right = div()
@@ -2110,21 +2272,46 @@ fn group() -> Div {
         .gap(px(2.0))
 }
 
-/// The same recessed grouping, stacked for the left-edge toolbar.
-fn vgroup() -> Div {
+/// One pill of the drawing toolbar.
+fn toolbar_pill() -> Div {
     div()
-        .w_full()
-        .p(px(2.0))
-        .rounded(px(CONTROL_RADIUS + 1.0))
-        .bg(rgba(GROUP))
+        .w(px(TOOLBAR_WIDTH))
+        .p(px(TOOLBAR_PADDING))
+        .rounded(px(TOOLBAR_RADIUS))
+        .bg(rgba(PANEL))
+        .border_1()
+        .border_color(rgba(BORDER))
+        .shadow_lg()
         .flex()
         .flex_col()
         .items_center()
-        .gap(px(2.0))
+        .gap(px(TOOL_SPACING))
 }
 
-fn rule() -> Div {
-    div().h(px(1.0)).w_full().bg(rgba(BORDER))
+/// One drawing-tool button. The selected tool is a light tile with a dark
+/// icon, as in the reference; disabled ones are dimmed and inert.
+fn tool_button(icon: &'static str, active: bool, enabled: bool) -> Div {
+    let colour = if active {
+        0x16161AFF
+    } else if enabled {
+        TEXT
+    } else {
+        0xFFFFFF40
+    };
+    let button = div()
+        .size(px(TOOL_BUTTON))
+        .rounded(px(CONTROL_RADIUS))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(svg().path(icon).size(px(TOOL_ICON)).text_color(rgba(colour)));
+    match (active, enabled) {
+        (true, _) => button.bg(rgba(0xE9E9EDFF)),
+        (false, true) => button
+            .cursor_pointer()
+            .hover(|style| style.bg(rgba(0xFFFFFF14))),
+        (false, false) => button,
+    }
 }
 
 fn icon_button(glyph: &'static str) -> Div {
@@ -2329,7 +2516,7 @@ fn ui_socket_path() -> std::path::PathBuf {
 /// already exists. A resident process costs nothing while hidden if no frames
 /// are decoded, which is why the frame is dropped on hide.
 pub fn run(show: bool) {
-    Application::new().run(move |cx| {
+    Application::new().with_assets(crate::icons::Icons).run(move |cx| {
         let display = cx.primary_display();
         let bounds = display
             .as_ref()

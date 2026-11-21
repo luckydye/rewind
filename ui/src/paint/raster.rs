@@ -1,8 +1,10 @@
 //! Rasterises Ink tips into a transparent RGBA layer.
 //!
-//! Strokes are kept as tips in normalised coordinates. A document can therefore
-//! be rendered at preview size while drawing and again at native resolution for
-//! the exported image or clip, without keeping a second copy of the frame.
+//! A stroke is laid in the units the pointer moves in (screen points), because
+//! the brush dynamics are tuned in those units: curve flatness, smoothing reach
+//! and velocity all assume one unit is about one pixel of hand movement. Each
+//! stroke remembers the size of the space it was drawn in, so the same document
+//! renders at preview size and again at native resolution for export.
 
 use super::color::encode_transfer;
 use super::gesture::{Gesture, GestureOptions, MarkSink};
@@ -15,6 +17,9 @@ pub struct Stroke {
     pub color: Rgb,
     pub kind: BrushKind,
     pub tips: Vec<BrushTip>,
+    /// Width and height of the surface the stroke was drawn on, in the same
+    /// units as its tips.
+    pub space: (f64, f64),
 }
 
 struct Recorder<'a> {
@@ -33,16 +38,14 @@ pub struct StrokeSession {
     color: Rgb,
     kind: BrushKind,
     tips: Vec<BrushTip>,
+    space: (f64, f64),
 }
 
 impl StrokeSession {
-    pub fn new(
-        kind: BrushKind,
-        brush: Brush,
-        color: Rgb,
-        point: Point,
-        gesture_scale: f64,
-    ) -> Self {
+    /// `point` and later readings are in the units of a surface `space` wide
+    /// and tall; `brush.width` is in those units too.
+    pub fn new(kind: BrushKind, brush: Brush, color: Rgb, point: Point, space: (f64, f64)) -> Self {
+        assert!(space.0 > 0.0 && space.1 > 0.0, "a stroke needs a surface to draw on");
         let mut tips = Vec::new();
         let gesture = {
             let mut recorder = Recorder { tips: &mut tips };
@@ -52,7 +55,7 @@ impl StrokeSession {
                     kind,
                     point,
                     brush,
-                    gesture_scale,
+                    gesture_scale: 1.0,
                 },
                 &mut recorder,
             )
@@ -62,6 +65,7 @@ impl StrokeSession {
             color,
             kind,
             tips,
+            space,
         }
     }
 
@@ -81,23 +85,70 @@ impl StrokeSession {
             color: self.color,
             kind: self.kind,
             tips: self.tips,
+            space: self.space,
         }
-    }
-
-    pub fn tips(&self) -> &[BrushTip] {
-        &self.tips
-    }
-
-    pub fn color(&self) -> Rgb {
-        self.color
     }
 
     pub fn kind(&self) -> BrushKind {
         self.kind
     }
+
+    /// The stroke as laid so far.
+    pub fn stroke(&self) -> Stroke {
+        Stroke { color: self.color, kind: self.kind, tips: self.tips.clone(), space: self.space }
+    }
+
+    /// The stroke so far, rasterised for a surface `width` by `height` but
+    /// only over the area it covers, so drawing costs the stroke rather than
+    /// the whole surface. `None` until the gesture has laid a mark.
+    pub fn render_region(&self, width: u32, height: u32) -> Option<Region> {
+        let scale = (width as f64 / self.space.0, height as f64 / self.space.1);
+        let mut bounds: Option<(f64, f64, f64, f64)> = None;
+        for tip in &self.tips {
+            let reach = tip.reach * scale.0 + 1.0;
+            let (x0, x1) = (tip.start.x.min(tip.end.x) * scale.0, tip.start.x.max(tip.end.x) * scale.0);
+            let (y0, y1) = (tip.start.y.min(tip.end.y) * scale.1, tip.start.y.max(tip.end.y) * scale.1);
+            let next = (x0 - reach, y0 - reach, x1 + reach, y1 + reach);
+            bounds = Some(match bounds {
+                None => next,
+                Some(b) => (b.0.min(next.0), b.1.min(next.1), b.2.max(next.2), b.3.max(next.3)),
+            });
+        }
+        let (x0, y0, x1, y1) = bounds?;
+        let x = (x0.floor().max(0.0) as u32).min(width);
+        let y = (y0.floor().max(0.0) as u32).min(height);
+        let region_width = (x1.ceil().min(width as f64) as u32).saturating_sub(x);
+        let region_height = (y1.ceil().min(height as f64) as u32).saturating_sub(y);
+        if region_width == 0 || region_height == 0 {
+            return None;
+        }
+        let target = Target { width: region_width, height: region_height, origin: (x as f64, y as f64), scale };
+        let mut layer = vec![0f32; region_width as usize * region_height as usize * 4];
+        let mut mask = vec![0f32; region_width as usize * region_height as usize];
+        composite(&mut layer, &mut mask, &target, &self.stroke());
+        Some(Region { x, y, width: region_width, height: region_height, pixels: to_rgba8(&layer) })
+    }
 }
 
-/// A stack of annotations over a capture, in normalised coordinates.
+/// Part of a surface: where it sits, its size, and straight-alpha RGBA.
+pub struct Region {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+/// The buffer being rasterised into: its size, where it sits on the surface,
+/// and how stroke units map to surface pixels.
+struct Target {
+    width: u32,
+    height: u32,
+    origin: (f64, f64),
+    scale: (f64, f64),
+}
+
+/// A stack of annotations over a capture.
 #[derive(Debug, Default, Clone)]
 pub struct Paint {
     strokes: Vec<Stroke>,
@@ -147,31 +198,32 @@ impl Paint {
         self.undone.clear();
     }
 
-    /// Renders the whole stack, optionally including a stroke that is still
-    /// under the pointer. Returns straight-alpha RGBA.
+    /// Renders the finished strokes, plus `live` on top when given, as
+    /// straight-alpha RGBA. An eraser under the pointer needs this: it only
+    /// shows against the strokes it removes.
     pub fn render_rgba(&self, width: u32, height: u32, live: Option<&StrokeSession>) -> Vec<u8> {
         let mut layer = vec![0f32; width as usize * height as usize * 4];
         let mut mask = vec![0f32; width as usize * height as usize];
-        for stroke in &self.strokes {
-            composite(&mut layer, &mut mask, width, height, stroke);
-        }
-        if let Some(live) = live {
-            let stroke = Stroke {
-                color: live.color(),
-                kind: live.kind(),
-                tips: live.tips().to_vec(),
+        let live = live.map(StrokeSession::stroke);
+        for stroke in self.strokes.iter().chain(live.as_ref()) {
+            let target = Target {
+                width,
+                height,
+                origin: (0.0, 0.0),
+                scale: (width as f64 / stroke.space.0, height as f64 / stroke.space.1),
             };
-            composite(&mut layer, &mut mask, width, height, &stroke);
+            composite(&mut layer, &mut mask, &target, stroke);
         }
         to_rgba8(&layer)
     }
 }
 
-fn composite(layer: &mut [f32], mask: &mut [f32], width: u32, height: u32, stroke: &Stroke) {
+fn composite(layer: &mut [f32], mask: &mut [f32], target: &Target, stroke: &Stroke) {
     mask.fill(0.0);
     for tip in &stroke.tips {
-        rasterize_tip(mask, width, height, tip);
+        rasterize_tip(mask, target, tip);
     }
+    let (width, height) = (target.width, target.height);
 
     let erase = stroke.kind == BrushKind::Eraser;
     let color = stroke.color;
@@ -199,14 +251,16 @@ fn composite(layer: &mut [f32], mask: &mut [f32], width: u32, height: u32, strok
 
 /// One swept capsule with a one-pixel antialiased edge, matching the canvas
 /// solid-tip coverage.
-fn rasterize_tip(mask: &mut [f32], width: u32, height: u32, tip: &BrushTip) {
-    let sx = tip.start.x * width as f64;
-    let sy = tip.start.y * height as f64;
-    let ex = tip.end.x * width as f64;
-    let ey = tip.end.y * height as f64;
-    let start_radius = tip.start_radius * width as f64;
-    let end_radius = tip.end_radius * width as f64;
-    let reach = tip.reach * width as f64 + 1.0;
+fn rasterize_tip(mask: &mut [f32], target: &Target, tip: &BrushTip) {
+    let (width, height, scale) = (target.width, target.height, target.scale);
+    let sx = tip.start.x * scale.0 - target.origin.0;
+    let sy = tip.start.y * scale.1 - target.origin.1;
+    let ex = tip.end.x * scale.0 - target.origin.0;
+    let ey = tip.end.y * scale.1 - target.origin.1;
+    // The surface keeps the capture's aspect, so either axis scales a radius.
+    let start_radius = tip.start_radius * scale.0;
+    let end_radius = tip.end_radius * scale.0;
+    let reach = tip.reach * scale.0 + 1.0;
 
     let min_x = ((sx.min(ex) - reach).floor().max(0.0)) as u32;
     let min_y = ((sy.min(ey) - reach).floor().max(0.0)) as u32;

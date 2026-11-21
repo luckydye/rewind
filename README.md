@@ -179,8 +179,8 @@ inside the overlay as status pills and a side panel, which was decoration.
 | Home / End | jump to the oldest frame / now |
 | I / O | set range start / end at the playhead |
 | A | select the whole buffer |
-| B | draw with Ink |
-| E | erase annotations |
+| B | Ink brush |
+| E | eraser |
 | [ / ] | thinner / thicker brush |
 | ⌘Z | undo the last stroke |
 | ⇧⌘Z | redo |
@@ -200,14 +200,14 @@ than opening Finder unprompted, because stealing focus would break Escape.
 
 Drawing is one Ink brush with the same dynamics as the canvas: speed and pen
 pressure set the width, strokes are smoothed with a B-spline, and the first
-stretch of a mouse stroke grows in instead of starting as a blob. Press `B` to
-show the toolbar down the left edge, `E` for the eraser, `[` / `]` for weight,
-`⌘Z` to take a stroke back and `⇧⌘Z` to redo it. Annotations are normalised to
-the capture, so the preview, a copied image and an exported clip all get the
-same drawing: the UI rasterises the layer at native resolution, `rewindd`
-composites it into the copied frame, and annotated clips are re-encoded through
-a Core Image video composition so the marks land in the file rather than only
-on screen.
+stretch of a mouse stroke grows in instead of starting as a blob. The drawing
+toolbar always floats down the left edge of the capture; `B` picks Ink, `E` the
+eraser, `[` / `]` change weight, `⌘Z` undoes and `⇧⌘Z` redoes. Annotations are
+normalised to the capture, so the preview, a copied image and an exported clip
+all get the same drawing: the UI rasterises the layer at native resolution,
+`rewindd` composites it into the copied frame, and annotated clips are
+re-encoded through a Core Image video composition so the marks land in the
+file rather than only on screen.
 
 The overlay is excluded from screen capture (`NSWindowSharingNone`), so the
 recorder never films itself and the preview cannot recurse into a picture-in-

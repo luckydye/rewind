@@ -106,33 +106,50 @@ enum ClipExporter {
         let annotation = CIImage(cgImage: try overlay.cgImage())
 
         let composition = AVMutableVideoComposition(asset: asset) { request in
-            let source = request.sourceImage.clampedToExtent()
+            let source = request.sourceImage
             let scaleX = source.extent.width / annotation.extent.width
             let scaleY = source.extent.height / annotation.extent.height
             let scaled = annotation
                 .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
                 .composited(over: source)
-                .cropped(to: request.sourceImage.extent)
+                .cropped(to: source.extent)
             request.finish(with: scaled, context: nil)
         }
 
         guard let session = AVAssetExportSession(
             asset: asset,
-            presetName: AVAssetExportPresetHEVCHighestQuality
+            presetName: AVAssetExportPresetHighestQuality
         ) else {
-            throw ClipExportError.annotationExportFailed("no HEVC export session")
+            throw ClipExportError.annotationExportFailed("no export session")
         }
         session.videoComposition = composition
+        session.outputURL = url
+        session.outputFileType = .mp4
 
         try? FileManager.default.removeItem(at: url)
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        do {
-            try await session.export(to: url, as: .mp4)
-        } catch {
-            throw ClipExportError.annotationExportFailed(error.localizedDescription)
+
+        let failure: String? = await withCheckedContinuation { continuation in
+            // The async `export(to:as:)` path silently drops `videoComposition`
+            // on macOS 15/26; the callback-based path applies it correctly.
+            session.exportAsynchronously {
+                switch session.status {
+                case .completed:
+                    continuation.resume(returning: nil)
+                case .failed, .cancelled:
+                    continuation.resume(
+                        returning: session.error?.localizedDescription ?? "export was cancelled"
+                    )
+                default:
+                    continuation.resume(returning: "export ended in status \(session.status.rawValue)")
+                }
+            }
+        }
+        if let failure {
+            throw ClipExportError.annotationExportFailed(failure)
         }
 
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
