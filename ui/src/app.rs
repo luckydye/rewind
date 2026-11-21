@@ -886,6 +886,7 @@ impl Rewind {
     /// |----------------|----------------------------------------|
     /// | Space          | play / pause                           |
     /// | ← / →          | one frame back / forward               |
+    /// | , / .          | one frame back / forward               |
     /// | ⇧← / ⇧→        | one second back / forward              |
     /// | ⌥← / ⌥→        | move the whole range by one second     |
     /// | ↑ / ↓          | jump to range start / end              |
@@ -911,6 +912,9 @@ impl Rewind {
             "right" if modifiers.alt => self.shift_range(-1.0, cx),
             "left" => self.nudge(step, cx),
             "right" => self.nudge(-step, cx),
+            // Editing convention: comma steps back a frame, period forward.
+            "," | "comma" => self.nudge(frame, cx),
+            "." | "period" => self.nudge(-frame, cx),
             "up" => self.jump_to_start(cx),
             "down" => self.jump_to_end(cx),
             "home" => {

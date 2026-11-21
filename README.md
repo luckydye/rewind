@@ -172,6 +172,7 @@ inside the overlay as status pills and a side panel, which was decoration.
 | drag a range edge | trim |
 | Space | play / pause |
 | ← / → | one frame back / forward |
+| , / . | one frame back / forward |
 | ⇧← / ⇧→ | one second back / forward |
 | ⌥← / ⌥→ | move the range by one second |
 | ↑ / ↓ | jump to range start / end |
