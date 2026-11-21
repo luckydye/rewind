@@ -5,8 +5,10 @@
 //! Two locks: `inner` for lifecycle and state (held briefly), `preview` for
 //! the decoder (held for a decode). A status request never waits on a decode.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,7 +21,7 @@ use crate::d3d;
 use crate::mp4;
 use crate::paths;
 use crate::pipeline::Pipeline;
-use crate::preview::PreviewEngine;
+use crate::preview::{Decoded, PreviewEngine};
 use crate::protocol::{ApplicationInfo, Clip, Crop, DisplayInfo, RawImage, RecorderConfig, State};
 use crate::ring::{Snapshot, TICKS_PER_SECOND};
 
@@ -36,7 +38,23 @@ struct Inner {
 
 pub struct Recorder {
     inner: Mutex<Inner>,
-    preview: Mutex<PreviewEngine>,
+    preview: Arc<Mutex<PreviewEngine>>,
+    /// Playback cache: the frame last served, then the frames decoded after
+    /// it. Its own lock, so a request for a frame that is already decoded
+    /// never waits on the decoder.
+    ahead: Arc<Mutex<VecDeque<Arc<Decoded>>>>,
+    prefetch: Sender<Prefetch>,
+    /// Requests waiting for the decoder; the prefetch worker yields to them.
+    waiting: Arc<AtomicUsize>,
+}
+
+/// Frames decoded ahead of playback. A keyframe takes the software decoder
+/// roughly ten times as long as a P-frame (~50 ms at 1440p); decoding it a
+/// few hundred milliseconds early keeps it out of the overlay's way.
+const AHEAD: usize = 8;
+
+struct Prefetch {
+    snapshot: Arc<Snapshot>,
 }
 
 /// What an export or a decode needs once the lock is released.
@@ -48,6 +66,17 @@ struct Frozen {
 
 impl Recorder {
     pub fn new(config: RecorderConfig) -> Arc<Self> {
+        let preview = Arc::new(Mutex::new(PreviewEngine::default()));
+        let ahead = Arc::new(Mutex::new(VecDeque::new()));
+        let (prefetch, jobs) = channel();
+        let waiting = Arc::new(AtomicUsize::new(0));
+        {
+            let (preview, ahead, waiting) = (preview.clone(), ahead.clone(), waiting.clone());
+            std::thread::Builder::new()
+                .name("prefetch".into())
+                .spawn(move || prefetch_worker(preview, ahead, waiting, jobs))
+                .expect("spawn the prefetch thread");
+        }
         Arc::new(Recorder {
             inner: Mutex::new(Inner {
                 config,
@@ -57,7 +86,10 @@ impl Recorder {
                 last_error: None,
                 last_attempt: None,
             }),
-            preview: Mutex::new(PreviewEngine::default()),
+            preview,
+            ahead,
+            prefetch,
+            waiting,
         })
     }
 
@@ -232,7 +264,85 @@ impl Recorder {
         let frozen = self.freeze(f64::INFINITY, 0.0, anchor)?;
         let now = frozen.snapshot.now(anchor);
         let index = frozen.snapshot.frame_index(now - seconds_ago);
-        self.preview.lock().unwrap().frame(&frozen.snapshot, index, width, frozen.size)
+        let target = frozen.snapshot.packets.get(index).cloned().ok_or("the rolling buffer is empty")?;
+
+        // Already decoded ahead: drop what playback has passed, keep the rest.
+        let cached = {
+            let mut ahead = self.ahead.lock().unwrap();
+            if tracing() {
+                let pts: Vec<i64> = ahead.iter().map(|d| d.packet().pts / 10_000).collect();
+                eprintln!("preview {index} (pts {} ms): cache {pts:?}", target.pts / 10_000);
+            }
+            ahead.iter().position(|d| Arc::ptr_eq(d.packet(), &target)).map(|at| {
+                ahead.drain(..at);
+                ahead[0].clone()
+            })
+        };
+
+        let trace = tracing();
+        let started = Instant::now();
+        let (decoded, forward) = match cached {
+            Some(decoded) => {
+                if trace {
+                    eprintln!("preview {index}: hit");
+                }
+                (decoded, true)
+            }
+            None => {
+                // The worker steps aside while a request waits; std's mutex
+                // is not fair, and it would otherwise keep re-taking the lock.
+                self.waiting.fetch_add(1, Ordering::SeqCst);
+                let mut engine = self.preview.lock().unwrap();
+                self.waiting.fetch_sub(1, Ordering::SeqCst);
+                let waited = started.elapsed();
+
+                // The worker may have decoded this very frame while we waited
+                // for the lock. Decoding it again would seek the decoder back
+                // and replay the whole GOP.
+                let decoded_meanwhile = {
+                    let mut ahead = self.ahead.lock().unwrap();
+                    ahead.iter().position(|d| Arc::ptr_eq(d.packet(), &target)).map(|at| {
+                        ahead.drain(..at);
+                        ahead[0].clone()
+                    })
+                };
+                if let Some(decoded) = decoded_meanwhile {
+                    drop(engine);
+                    if trace {
+                        eprintln!("preview {index}: hit after waiting {:.0} ms", waited.as_secs_f64() * 1e3);
+                    }
+                    let image = decoded.render(frozen.size, width);
+                    let _ = self.prefetch.send(Prefetch { snapshot: Arc::new(frozen.snapshot) });
+                    return Ok(image);
+                }
+
+                let before = engine
+                    .last()
+                    .and_then(|last| frozen.snapshot.packets.iter().rposition(|p| Arc::ptr_eq(p, last.packet())));
+                let decoded = engine.decode(&frozen.snapshot, index, frozen.size)?;
+                // Under the decoder lock, so the prefetch worker cannot slip a
+                // frame from the old position in between.
+                let mut ahead = self.ahead.lock().unwrap();
+                ahead.clear();
+                ahead.push_back(decoded.clone());
+                // Playing, or stepping forward: a few frames on from the last.
+                let forward = before.is_some_and(|b| b <= index && index - b <= 4);
+                if trace {
+                    eprintln!(
+                        "preview {index}: miss, decoder at {before:?}, lock {:.0} ms, total {:.0} ms",
+                        waited.as_secs_f64() * 1e3,
+                        started.elapsed().as_secs_f64() * 1e3
+                    );
+                }
+                (decoded, forward)
+            }
+        };
+
+        let image = decoded.render(frozen.size, width);
+        if forward {
+            let _ = self.prefetch.send(Prefetch { snapshot: Arc::new(frozen.snapshot) });
+        }
+        Ok(image)
     }
 
     pub fn thumbnails(&self, count: usize, width: u32, anchor: Option<f64>) -> Result<Vec<RawImage>, String> {
@@ -258,6 +368,61 @@ impl Recorder {
             .map(|ago| frozen.snapshot.keyframe_index(frozen.snapshot.frame_index(now - ago)))
             .collect();
         self.preview.lock().unwrap().thumbnails(&frozen.snapshot, &indices, width, frozen.size)
+    }
+}
+
+/// `REWIND_TRACE=1` logs every preview request: cache hit or miss, where the
+/// decoder was, and how long the request waited for it.
+fn tracing() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("REWIND_TRACE").is_some())
+}
+
+/// Keeps the playback cache `AHEAD` frames past the one last served, one
+/// decode per lock so a request that misses the cache waits for at most one
+/// frame. Stops as soon as a newer request arrives, and empties the cache when
+/// the overlay has been quiet for a while, so a closed overlay holds no frames.
+fn prefetch_worker(
+    preview: Arc<Mutex<PreviewEngine>>,
+    ahead: Arc<Mutex<VecDeque<Arc<Decoded>>>>,
+    waiting: Arc<AtomicUsize>,
+    jobs: Receiver<Prefetch>,
+) {
+    loop {
+        let mut job = match jobs.recv_timeout(Duration::from_secs(10)) {
+            Ok(job) => job,
+            Err(RecvTimeoutError::Timeout) => {
+                ahead.lock().unwrap().clear();
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        loop {
+            while let Ok(newer) = jobs.try_recv() {
+                job = newer;
+            }
+            if ahead.lock().unwrap().len() > AHEAD {
+                break;
+            }
+            if waiting.load(Ordering::SeqCst) > 0 {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            let mut engine = preview.lock().unwrap();
+            // The cache must end where the decoder is; if a request seeked in
+            // the meantime, this job is stale.
+            let in_step = {
+                let ahead = ahead.lock().unwrap();
+                matches!((ahead.back(), engine.last()), (Some(a), Some(b)) if Arc::ptr_eq(a, b))
+            };
+            if !in_step {
+                break;
+            }
+            match engine.decode_next(&job.snapshot) {
+                Some(decoded) => ahead.lock().unwrap().push_back(decoded),
+                None => break,
+            }
+        }
     }
 }
 

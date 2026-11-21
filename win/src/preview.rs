@@ -19,13 +19,26 @@ use crate::ring::{Packet, ParameterSets, Snapshot};
 
 const START_CODE: [u8; 4] = [0, 0, 0, 1];
 
-struct Decoded {
+/// One decoded frame. Shared, so the playback cache and the decoder can both
+/// hold it without copying 5 MB of NV12.
+pub struct Decoded {
     packet: Arc<Packet>,
     /// NV12 as the decoder laid it out: `stride` bytes per row, chroma after
     /// `plane_rows` rows of luma.
     pixels: Vec<u8>,
     stride: usize,
     plane_rows: usize,
+}
+
+impl Decoded {
+    pub fn packet(&self) -> &Arc<Packet> {
+        &self.packet
+    }
+
+    /// BGRA at `width` (0 = native), cropped to the encoded `size`.
+    pub fn render(&self, size: (u32, u32), width: u32) -> RawImage {
+        to_bgra(self, size, width)
+    }
 }
 
 struct Decoder {
@@ -38,7 +51,8 @@ struct Decoder {
 #[derive(Default)]
 pub struct PreviewEngine {
     decoder: Option<Decoder>,
-    decoded: Option<Decoded>,
+    /// The last frame out of the decoder: where its state is.
+    last: Option<Arc<Decoded>>,
 }
 
 // The MFT is created and used only behind the recorder's preview mutex.
@@ -48,13 +62,11 @@ impl PreviewEngine {
     /// `width` 0 means native: never downscale below the capture size unless
     /// asked, text stops being readable.
     pub fn frame(&mut self, snapshot: &Snapshot, index: usize, width: u32, size: (u32, u32)) -> Result<RawImage, String> {
-        if snapshot.packets.is_empty() {
-            return Err("the rolling buffer is empty".into());
-        }
-        let index = index.min(snapshot.packets.len() - 1);
-        self.decode(snapshot, index, size)?;
-        let decoded = self.decoded.as_ref().ok_or("the decoder produced no frame")?;
-        Ok(to_bgra(decoded, size, width))
+        Ok(self.decode(snapshot, index, size)?.render(size, width))
+    }
+
+    pub fn last(&self) -> Option<&Arc<Decoded>> {
+        self.last.as_ref()
     }
 
     /// Thumbnails come from keyframes, which decode without their
@@ -77,7 +89,7 @@ impl PreviewEngine {
                         let mut engine = PreviewEngine::default();
                         part.iter()
                             .map(|&index| {
-                                engine.decoded = None;
+                                engine.last = None;
                                 engine.frame(snapshot, index, width, size).map(|image| (index, image))
                             })
                             .collect()
@@ -102,26 +114,40 @@ impl PreviewEngine {
             .collect()
     }
 
-    fn decode(&mut self, snapshot: &Snapshot, target: usize, size: (u32, u32)) -> Result<(), String> {
+    /// The frame at `target`, continuing from the decoder's current position
+    /// when that is cheaper than restarting at the keyframe.
+    pub fn decode(&mut self, snapshot: &Snapshot, target: usize, size: (u32, u32)) -> Result<Arc<Decoded>, String> {
+        if snapshot.packets.is_empty() {
+            return Err("the rolling buffer is empty".into());
+        }
+        let target = target.min(snapshot.packets.len() - 1);
         let needs_decoder = self
             .decoder
             .as_ref()
             .is_none_or(|d| d.sps != snapshot.parameters.sps);
         if needs_decoder {
             self.decoder = None;
-            self.decoded = None;
+            self.last = None;
             self.decoder = Some(Decoder::new(size).map_err(|e| format!("cannot create the H.264 decoder: {}", e.message()))?);
         }
 
         let keyframe = snapshot.keyframe_index(target);
         let mut start = keyframe;
         let mut flush = true;
-        if let Some(decoded) = &self.decoded {
+        if let Some(last) = &self.last {
             // Same frame again (a static screen between two scrub positions),
-            // or a frame further along the same GOP: continue from there.
-            if let Some(existing) = (keyframe..=target).find(|&i| Arc::ptr_eq(&snapshot.packets[i], &decoded.packet)) {
+            // or a frame further along: continue from there. That includes
+            // crossing into the next GOP — the stream is continuous, so the
+            // decoder just keeps going. Restarting at each keyframe instead
+            // (flush, then decode the IDR) stalled playback once a second.
+            // Continuing wins whenever it decodes no more frames than a
+            // restart would, plus the restart's flush and IDR overhead.
+            const RESTART_COST: usize = 8;
+            let restart = target - keyframe + 1 + RESTART_COST;
+            let earliest = target.saturating_sub(restart);
+            if let Some(existing) = (earliest..=target).rev().find(|&i| Arc::ptr_eq(&snapshot.packets[i], &last.packet)) {
                 if existing == target {
-                    return Ok(());
+                    return Ok(last.clone());
                 }
                 start = existing + 1;
                 flush = false;
@@ -130,25 +156,53 @@ impl PreviewEngine {
 
         let decoder = self.decoder.as_mut().unwrap();
         if flush {
-            self.decoded = None;
+            self.last = None;
             decoder.flush();
         }
         for index in start..=target {
             let packet = &snapshot.packets[index];
+            // Parameter sets go in front of the keyframe the decoder starts
+            // from, not in front of every keyframe of a continuous stream.
+            let parameters = (flush && index == start).then_some(&snapshot.parameters);
             let output = decoder
-                .decode(packet, &snapshot.parameters, index == target)
+                .decode(packet, parameters, index == target)
                 .map_err(|e| format!("decode failed: {}", e.message()))?;
             if let Some((pixels, stride, plane_rows)) = output {
-                self.decoded = Some(Decoded { packet: packet.clone(), pixels, stride, plane_rows });
+                self.last = Some(Arc::new(Decoded { packet: packet.clone(), pixels, stride, plane_rows }));
             }
         }
         // A decoder that hands frames out late would leave an older frame
         // here; never present it as the requested one.
-        match &self.decoded {
-            Some(decoded) if Arc::ptr_eq(&decoded.packet, &snapshot.packets[target]) => Ok(()),
+        match &self.last {
+            Some(last) if Arc::ptr_eq(&last.packet, &snapshot.packets[target]) => Ok(last.clone()),
             _ => {
-                self.decoded = None;
+                self.last = None;
                 Err("the decoder produced no frame for this position".into())
+            }
+        }
+    }
+
+    /// Decodes the frame after the current position, for playback prefetch.
+    /// `None` when there is nothing to continue from or the buffer ends.
+    pub fn decode_next(&mut self, snapshot: &Snapshot) -> Option<Arc<Decoded>> {
+        let last = self.last.clone()?;
+        let decoder = self.decoder.as_mut()?;
+        if decoder.sps != snapshot.parameters.sps {
+            return None;
+        }
+        let index = snapshot.packets.iter().rposition(|p| Arc::ptr_eq(p, &last.packet))?;
+        let packet = snapshot.packets.get(index + 1)?;
+        match decoder.decode(packet, None, true) {
+            Ok(Some((pixels, stride, plane_rows))) => {
+                let decoded = Arc::new(Decoded { packet: packet.clone(), pixels, stride, plane_rows });
+                self.last = Some(decoded.clone());
+                Some(decoded)
+            }
+            // The decoder moved without telling us where: the next request
+            // restarts from a keyframe rather than trust its state.
+            _ => {
+                self.last = None;
+                None
             }
         }
     }
@@ -212,9 +266,10 @@ impl Decoder {
     }
 
     /// Feeds one access unit. Returns the frame that came out, if any.
-    fn decode(&mut self, packet: &Packet, parameters: &ParameterSets, last: bool) -> WinResult<Option<(Vec<u8>, usize, usize)>> {
+    /// `parameters` is given only where the decoder starts from scratch.
+    fn decode(&mut self, packet: &Packet, parameters: Option<&ParameterSets>, last: bool) -> WinResult<Option<(Vec<u8>, usize, usize)>> {
         let annex_b = to_annex_b(packet, parameters);
-        if self.sps.is_empty() {
+        if let Some(parameters) = parameters.filter(|_| self.sps.is_empty()) {
             self.sps = parameters.sps.clone();
         }
 
@@ -297,10 +352,10 @@ impl Decoder {
 }
 
 /// The ring stores AVCC without parameter sets; the decoder wants start
-/// codes, with SPS/PPS in front of every keyframe so any GOP decodes alone.
-fn to_annex_b(packet: &Packet, parameters: &ParameterSets) -> Vec<u8> {
+/// codes, with SPS/PPS in front of the keyframe it starts from.
+fn to_annex_b(packet: &Packet, parameters: Option<&ParameterSets>) -> Vec<u8> {
     let mut out = Vec::with_capacity(packet.data.len() + 64);
-    if packet.keyframe {
+    if let Some(parameters) = parameters.filter(|_| packet.keyframe) {
         out.extend_from_slice(&START_CODE);
         out.extend_from_slice(&parameters.sps);
         out.extend_from_slice(&START_CODE);

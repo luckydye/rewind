@@ -392,6 +392,20 @@ Decisions worth knowing:
   windows in logical pixels. Above 100% scaling that is smaller than the
   screen, and the first show happens before the daemon has reported which
   display is captured.
+- **Playback decodes ahead.** The overlay plays back by asking for one
+  frame at a time, so any slow decode is a visible stall. Two of them made
+  playback jaggy:
+  - **Keyframe crossings:** the decoder was restarted at every keyframe it
+    crossed. It now simply keeps going, since the stream is continuous.
+  - **IDR decodes:** an IDR takes the software decoder roughly ten times as
+    long as a P-frame (~50 ms at 1440p).
+
+  While requests move forward, a prefetch worker keeps up to 8 frames
+  decoded past the one last shown, in a cache with its own lock. A frame
+  that is already decoded never waits on the decoder, and the worker steps
+  aside while a request does wait. `rewindctl play --from 50` replays the
+  overlay's request pattern. `REWIND_TRACE=1` on the daemon logs each
+  request: cache hit or miss, the decoder's position, and lock wait.
 - **Thumbnails decode in parallel.** Each thumbnail is an independent
   keyframe, so each distinct one is decoded once across up to six decoders:
   250 ms for 24 at 1440p instead of 1.1 s in sequence.
@@ -456,7 +470,12 @@ Preview round trips over the pipe, release build, at 2560×1440:
 | same frame repeatedly | 22 ms |
 | native 2560×1440 frame | 186 ms |
 | scrub backward, 1280 wide | 69–79 ms |
+| playback 50 s back, 1280 wide, paced like the overlay | median 8 ms, frame gaps p99 21 ms |
 | 24 thumbnails / 64 thumbnails | 250 ms / 356 ms |
+
+Before the prefetch, playback 50 s back stalled for 60–90 ms once a second,
+at every keyframe. Now a stall over 50 ms happens only right after a seek,
+while the decoder catches up.
 
 While hidden, the resident overlay used 0.016 s of CPU over 10 s, with an
 83 MB working set (GPUI and Direct3D).

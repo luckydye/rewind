@@ -149,6 +149,61 @@ fn run(args: &[String]) -> Result<(), String> {
                 println!("wrote {out}");
             }
         }
+        // Plays back the way the overlay does: anchor pinned when it opens,
+        // one preview request in flight, the playhead advancing in real time.
+        Some("play") => {
+            let from: f64 = number(args, "--from")?.unwrap_or(50.0);
+            let seconds: f64 = number(args, "--seconds")?.unwrap_or(5.0);
+            let width: i64 = number(args, "--width")?.unwrap_or(1280);
+            let anchor = call(Request::new(Command::Status))?.state.and_then(|s| s.newest_timestamp);
+            // The overlay's ticker fires every 16 ms and sends a request only
+            // when none is in flight.
+            let pace = std::time::Duration::from_millis(number(args, "--pace")?.unwrap_or(16));
+            let started = Instant::now();
+            let mut latencies = Vec::new();
+            let mut gaps = Vec::new();
+            let mut last_frame = Instant::now();
+            while started.elapsed().as_secs_f64() < seconds {
+                let tick = Instant::now();
+                let mut request = Request::new(Command::PreviewFrame);
+                request.seconds = Some((from - started.elapsed().as_secs_f64()).max(0.0));
+                request.width = Some(width);
+                request.anchor = anchor;
+                let t = Instant::now();
+                match server::call(&request).map_err(|e| e.to_string())? {
+                    Reply::Image(_) => {
+                        let ms = t.elapsed().as_secs_f64() * 1000.0;
+                        if ms > 50.0 && args.iter().any(|a| a == "--verbose") {
+                            println!("  {:6.2}s ago: {ms:.0} ms", request.seconds.unwrap_or(0.0));
+                        }
+                        latencies.push(ms);
+                        // Time between two frames reaching the screen: what
+                        // reads as smooth or jaggy.
+                        gaps.push(last_frame.elapsed().as_secs_f64() * 1000.0);
+                        last_frame = Instant::now();
+                    }
+                    Reply::Json(response) => return Err(response.error.unwrap_or_default()),
+                    Reply::Images(_) => return Err("unexpected reply".into()),
+                }
+                if let Some(rest) = pace.checked_sub(tick.elapsed()) {
+                    std::thread::sleep(rest);
+                }
+            }
+            latencies.sort_by(f64::total_cmp);
+            gaps.remove(0);
+            gaps.sort_by(f64::total_cmp);
+            let at = |v: &Vec<f64>, q: f64| v[((v.len() - 1) as f64 * q) as usize];
+            println!(
+                "from {from}s ago: {:.1} frames/s; latency median {:.0} ms, p90 {:.0} ms, max {:.0} ms; frame gaps p99 {:.0} ms, max {:.0} ms, >50 ms: {}",
+                latencies.len() as f64 / seconds,
+                at(&latencies, 0.5),
+                at(&latencies, 0.9),
+                at(&latencies, 1.0),
+                at(&gaps, 0.99),
+                at(&gaps, 1.0),
+                gaps.iter().filter(|g| **g > 50.0).count()
+            );
+        }
         Some("thumbnails") => {
             let mut request = Request::new(Command::Thumbnails);
             request.count = Some(number(args, "--count")?.unwrap_or(24));
