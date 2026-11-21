@@ -483,6 +483,8 @@ impl Rewind {
                     .update(cx, |view, cx| {
                         cx.notify();
                         view.focus_until.is_none()
+                            && crate::activate::is_active()
+                            && crate::activate::is_key_window()
                     })
                     .unwrap_or(true);
                 if settled {
@@ -496,7 +498,7 @@ impl Rewind {
         // Another app may still hold activation, and taking focus is what makes
         // the keys land here. Bounded by time rather than by a render count,
         // which can all elapse before the window is key-able.
-        self.focus_until = Some(Instant::now() + Duration::from_millis(1500));
+        self.focus_until = Some(Instant::now() + Duration::from_millis(2500));
         // Full bleed until the first frame arrives; `received` starts the morph
         // so it never animates a placeholder.
         self.progress = 0.0;
@@ -1780,10 +1782,14 @@ impl Render for Rewind {
         // Enter and Escape. `focus_until` bounds the retries: re-asserting focus
         // unconditionally invalidates the window every frame and pins a core.
         if let Some(until) = self.focus_until {
-            if self.focus.is_focused(window) || Instant::now() >= until {
+            let ready = self.focus.is_focused(window)
+                && crate::activate::is_active()
+                && crate::activate::is_key_window();
+            if ready || Instant::now() >= until {
                 self.focus_until = None;
             } else {
                 window.focus(&self.focus);
+                crate::activate::activate();
             }
         }
 

@@ -29,9 +29,24 @@ final class UILauncher {
     }
 
     func open() {
-        if poke() { return }
+        if poke() {
+            // The resident overlay shows itself, but macOS often ignores a
+            // background app activating itself. Activating its process from
+            // here is the path that actually moves the keyboard focus.
+            activateOverlay(attempts: Self.activationAttempts)
+            return
+        }
         // Nothing is listening: the overlay was never preloaded or it died.
         spawn(arguments: ["--show"])
+    }
+
+    private func activateOverlay(attempts: Int) {
+        let pid = process?.processIdentifier
+            ?? NSWorkspace.shared.runningApplications
+                .first { $0.executableURL?.lastPathComponent == "rewind-ui" }?
+                .processIdentifier
+        guard let pid else { return }
+        activate(pid: pid, attempts: attempts)
     }
 
     /// One byte down the overlay's socket is the whole show request.
@@ -91,6 +106,14 @@ final class UILauncher {
             }
             return
         }
+        if application.isActive { return }
         application.activate(options: [.activateAllWindows])
+        // Activation is asynchronous and silently dropped sometimes; retry
+        // until macOS agrees, rather than hoping the one call landed.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            guard let self else { return }
+            if NSRunningApplication(processIdentifier: pid)?.isActive == true { return }
+            self.activate(pid: pid, attempts: attempts - 1)
+        }
     }
 }

@@ -23,6 +23,7 @@ type SendUnsigned = unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> *mu
 type SendPointer = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void;
 type SendPair = unsafe extern "C" fn(*mut c_void, *mut c_void, f64, f64) -> *mut c_void;
 type SendDouble = unsafe extern "C" fn(*mut c_void, *mut c_void, f64) -> *mut c_void;
+type SendBool = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
 
 fn selector(name: &std::ffi::CStr) -> *mut c_void {
     unsafe { sel_registerName(name.as_ptr()) }
@@ -82,8 +83,28 @@ pub fn activate() {
 
         // Ordering the window front after activating closes the race where
         // activation is accepted but the window has not been ordered yet.
+        // `makeKeyWindow` is the part that routes keys here; ordering alone
+        // leaves the window frontmost but not key.
         let order: SendPointer = std::mem::transmute(objc_msgSend as *const ());
         order(only_window(), selector(c"makeKeyAndOrderFront:"), std::ptr::null_mut());
+        order(only_window(), selector(c"makeKeyWindow"), std::ptr::null_mut());
+    }
+}
+
+/// Whether macOS considers the overlay the active application. A window can be
+/// key while its app is inactive, and keys still go elsewhere.
+pub fn is_active() -> bool {
+    unsafe {
+        let is_active: SendBool = std::mem::transmute(objc_msgSend as *const ());
+        is_active(shared_application(), selector(c"isActive"))
+    }
+}
+
+/// Whether the overlay is the key window, the one macOS sends keys to.
+pub fn is_key_window() -> bool {
+    unsafe {
+        let key = send()(shared_application(), selector(c"keyWindow"));
+        !key.is_null() && key == only_window()
     }
 }
 
