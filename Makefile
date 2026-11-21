@@ -43,10 +43,11 @@ doctor: build
 bundle: ui-release
 	cd $(DAEMON) && swift build -c release
 	@rm -rf $(BUNDLE)
-	@mkdir -p $(BUNDLE)/Contents/MacOS
+	@mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
 	@cp $(RELEASE)/rewindd $(BUNDLE)/Contents/MacOS/Rewind
 	@cp ui/target/release/rewind-ui $(BUNDLE)/Contents/MacOS/rewind-ui
 	@cp resources/Info.plist $(BUNDLE)/Contents/Info.plist
+	@cp resources/Rewind.icns $(BUNDLE)/Contents/Resources/Rewind.icns
 	@codesign --force --sign "$(SIGN_IDENTITY)" $(BUNDLE) || { \
 		echo ""; \
 		echo "Signing failed. 'errSecInternalComponent' means codesign could not unlock"; \

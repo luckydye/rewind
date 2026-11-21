@@ -10,6 +10,8 @@
 	<string>com.tihav.rewind</string>
 	<key>CFBundleExecutable</key>
 	<string>Rewind</string>
+	<key>CFBundleIconFile</key>
+	<string>Rewind</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
