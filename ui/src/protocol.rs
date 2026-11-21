@@ -78,6 +78,7 @@ pub enum Command {
     PreviewFrame,
     Thumbnails,
     EdgeFrames,
+    Estimate,
     CopyFrame,
     CopyClip,
     #[serde(rename = "openUI")]
@@ -169,6 +170,8 @@ pub struct Clip {
 pub struct Response {
     pub ok: bool,
     pub error: Option<String>,
+    #[serde(default)]
+    pub estimated_bytes: Option<i64>,
     pub state: Option<State>,
     pub clip: Option<Clip>,
     pub displays: Option<Vec<DisplayInfo>>,

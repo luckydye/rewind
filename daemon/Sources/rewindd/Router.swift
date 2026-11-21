@@ -66,6 +66,17 @@ enum Router {
                 )
                 return .images(images)
 
+            case .estimate:
+                guard let range = request.range, range.duration > 0 else {
+                    return .json(.failure("estimate needs a range"))
+                }
+                let bytes = try await recorder.estimate(
+                    from: range.from,
+                    to: range.to,
+                    anchor: request.anchor
+                )
+                return .json(Response(ok: true, estimatedBytes: bytes))
+
             case .edgeFrames:
                 let images = try await recorder.edgeFrames(
                     from: request.range?.from ?? request.seconds ?? 0,

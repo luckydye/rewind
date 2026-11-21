@@ -108,6 +108,13 @@ actor Recorder {
         return try previews.thumbnails(frames: snapshot.frames, indices: indices, width: width)
     }
 
+    /// Size of the encoded frames in a range: the same cut the exporter makes,
+    /// without decoding or muxing anything.
+    func estimate(from: Double, to: Double, anchor: Double?) async throws -> Int {
+        guard let ring else { throw RecorderError.notRecording }
+        return try ring.snapshot(from: from, to: to, anchor: anchor).bytes
+    }
+
     /// First and last frame of a range, for the side-by-side preview while the
     /// range is being dragged. Both come from keyframes, like thumbnails.
     func edgeFrames(from: Double, to: Double, width: Int, anchor: Double?) async throws -> [RawImage] {

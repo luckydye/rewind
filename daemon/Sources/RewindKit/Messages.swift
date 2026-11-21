@@ -24,6 +24,7 @@ public enum Command: String, Codable, Sendable {
     case previewFrame
     case thumbnails
     case edgeFrames
+    case estimate
     case copyFrame
     case copyClip
     case openUI
@@ -154,6 +155,8 @@ public struct Response: Codable, Sendable {
     public var clip: Clip?
     public var displays: [DisplayInfo]?
     public var applications: [ApplicationInfo]?
+    /// Exact size of the encoded frames a range would export.
+    public var estimatedBytes: Int?
 
     public init(
         ok: Bool,
@@ -161,7 +164,8 @@ public struct Response: Codable, Sendable {
         state: State? = nil,
         clip: Clip? = nil,
         displays: [DisplayInfo]? = nil,
-        applications: [ApplicationInfo]? = nil
+        applications: [ApplicationInfo]? = nil,
+        estimatedBytes: Int? = nil
     ) {
         self.ok = ok
         self.error = error
@@ -169,6 +173,7 @@ public struct Response: Codable, Sendable {
         self.clip = clip
         self.displays = displays
         self.applications = applications
+        self.estimatedBytes = estimatedBytes
     }
 
     public static func failure(_ message: String) -> Response {

@@ -138,9 +138,8 @@ pub struct Rewind {
     anchor: Option<f64>,
     /// Capture frame rate, so frame stepping lands on real frames.
     fps: f64,
-    /// Average bitrate of the rolling buffer, for estimating an export's size
-    /// before rendering it.
-    bitrate: f64,
+    /// Exact encoded size of the current range, from the daemon.
+    estimated_bytes: Option<i64>,
     /// Entrance progress: 0 is a full-bleed preview with the bar off-screen,
     /// 1 is the resting layout.
     progress: f32,
@@ -200,7 +199,7 @@ impl Rewind {
             span: 1.0,
             anchor: None,
             fps: 30.0,
-            bitrate: 0.0,
+            estimated_bytes: None,
             progress: 1.0,
             safe_top: 0.0,
             graveyard: Vec::new(),
@@ -248,7 +247,6 @@ impl Rewind {
             .map(|state| state.config.fps as f64)
             .unwrap_or(30.0)
             .max(1.0);
-        self.bitrate = state.map(|state| state.bitrate).unwrap_or(0.0);
         self.safe_top = state
             .and_then(|state| state.display.as_ref())
             .map(|display| display.safe_area_top as f32)
@@ -277,6 +275,7 @@ impl Rewind {
         self.copy_failed = false;
         self.request_frame(cx);
         self.request_edge_frames(cx);
+        self.request_estimate(cx);
         self.fetch_thumbnails(cx);
         cx.notify();
     }
@@ -322,6 +321,37 @@ impl Rewind {
         self.close_generation = self.close_generation.wrapping_add(1);
         self.closing = false;
         self.copy_failed = false;
+    }
+
+    /// Exact encoded size of the range: cheap on the daemon side and kept
+    /// separate from the edge frames so a slow decode cannot delay it.
+    fn request_estimate(&mut self, cx: &mut Context<Self>) {
+        let range = (self.sel_from, self.sel_to);
+        let anchor = self.anchor;
+        let client = self.client.clone();
+        cx.spawn(async move |this, cx| {
+            let reply = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut request = Request::new(Command::Estimate);
+                    request.range = Some(ClipRange {
+                        from: range.0,
+                        to: range.1,
+                    });
+                    request.anchor = anchor;
+                    ipc::call(&client, request)
+                })
+                .await;
+
+            this.update(cx, |view, cx| {
+                if let Ok(response) = reply {
+                    view.estimated_bytes = response.estimated_bytes;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// First and last frame of the range. Coalesced like the main preview: one
@@ -481,14 +511,13 @@ impl Rewind {
         left + width * fraction as f32
     }
 
-    /// Rough size of the selected range at the buffer's average bitrate. Exports
-    /// cut on keyframes, so the clip is usually a hair longer than selected.
+    /// Exact size of the encoded frames the range would export, computed by the
+    /// daemon from the ring without decoding anything.
     fn estimated_size(&self) -> String {
-        if self.bitrate <= 0.0 {
-            return String::new();
+        match self.estimated_bytes {
+            Some(bytes) if bytes > 0 => format!(" · ~{:.1} MB", bytes as f64 / 1_048_576.0),
+            _ => String::new(),
         }
-        let bytes = self.selection_duration() * self.bitrate / 8.0;
-        format!(" · ~{:.1} MB", bytes / 1_048_576.0)
     }
 
     fn selection_duration(&self) -> f64 {
@@ -527,6 +556,8 @@ impl Rewind {
         self.sel_to = 0.0;
         self.playhead = self.span;
         self.request_frame(cx);
+        self.request_edge_frames(cx);
+        self.request_estimate(cx);
         cx.notify();
     }
 
@@ -956,12 +987,14 @@ impl Rewind {
     fn mark_start(&mut self, cx: &mut Context<Self>) {
         self.sel_from = self.playhead.clamp(0.1, self.span);
         self.sel_to = self.sel_to.min(self.sel_from - 0.1).max(0.0);
+        self.request_estimate(cx);
         cx.notify();
     }
 
     fn mark_end(&mut self, cx: &mut Context<Self>) {
         self.sel_to = self.playhead.clamp(0.0, self.span - 0.1);
         self.sel_from = self.sel_from.max(self.sel_to + 0.1).min(self.span);
+        self.request_estimate(cx);
         cx.notify();
     }
 
@@ -1045,6 +1078,7 @@ impl Rewind {
 
         if edits_range {
             self.request_edge_frames(cx);
+            self.request_estimate(cx);
         }
         cx.notify();
     }
