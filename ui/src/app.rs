@@ -19,6 +19,7 @@ use crate::icons;
 use crate::ipc::{self, Client, RawImage, Reply};
 use crate::paint::{Brush, BrushKind, Paint, Point, Rgb, StrokeSession, from_srgb_hex};
 use crate::protocol::{ClipRange, Command, Crop, ExportFormat, Request};
+use crate::settings::{self, Output, Settings};
 use crate::trace;
 
 // MARK: - Geometry
@@ -138,34 +139,6 @@ enum Busy {
     Copy,
 }
 
-/// What Copy puts on the clipboard and Export saves: the frame under the
-/// playhead as PNG, or the range as MP4 or GIF.
-#[derive(Clone, Copy, PartialEq)]
-enum Output {
-    Image,
-    Mp4,
-    Gif,
-}
-
-impl Output {
-    fn label(self) -> &'static str {
-        match self {
-            Output::Image => "Image",
-            Output::Mp4 => "MP4",
-            Output::Gif => "GIF",
-        }
-    }
-
-    /// The clip format for range actions. ⌘C always copies the range, so with
-    /// Image selected it falls back to MP4.
-    fn clip_format(self) -> ExportFormat {
-        match self {
-            Output::Gif => ExportFormat::Gif,
-            Output::Image | Output::Mp4 => ExportFormat::Mp4,
-        }
-    }
-}
-
 /// Which range frame the stage shows while dragging.
 #[derive(Clone, Copy, PartialEq)]
 enum EdgeMode {
@@ -276,7 +249,11 @@ pub struct Rewind {
     /// timer cannot speed playback up or slow it down.
     playback_clock: Option<Instant>,
     last_clip: Option<String>,
+    /// Remembered between captures, with the crop; see `settings.rs`.
     output: Output,
+    /// The settings file could not be read or written. Shown each time the
+    /// overlay opens until a save succeeds.
+    settings_error: Option<String>,
     /// Bumped whenever a close starts or the overlay is shown again, so a copy
     /// that finishes late cannot hide an overlay the user has reopened.
     close_generation: u64,
@@ -333,6 +310,10 @@ pub struct Rewind {
 
 impl Rewind {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        let (remembered, settings_error) = match settings::load() {
+            Ok(settings) => (settings, None),
+            Err(error) => (Settings::default(), Some(format!("settings unreadable: {error}"))),
+        };
         Self {
             focus: cx.focus_handle(),
             client: Client::new(),
@@ -361,14 +342,15 @@ impl Rewind {
             drag: None,
             busy: None,
             status: None,
+            settings_error,
             ticker: None,
             playback_clock: None,
-            output: Output::Image,
+            output: remembered.output,
             close_generation: 0,
             draw_eraser: false,
             weight_drag: None,
             colors_open: false,
-            crop: None,
+            crop: remembered.crop,
             crop_drag: None,
             cropping: false,
             exiting: false,
@@ -433,7 +415,9 @@ impl Rewind {
         self.status = response
             .as_ref()
             .err()
-            .map(|error| Status::Error(error.to_string()));
+            .map(|error| error.to_string())
+            .or_else(|| self.settings_error.clone())
+            .map(Status::Error);
         // Dropped through GPUI, not just discarded: a frame still in the sprite
         // atlas stays resident even when nothing references it.
         self.release_images(cx);
@@ -448,7 +432,6 @@ impl Rewind {
         self.live_overlay = None;
         self.draw_eraser = false;
         self.cropping = false;
-        self.crop = None;
         self.crop_drag = None;
         self.request_frame(cx);
         self.request_edge_frames(cx);
@@ -985,14 +968,36 @@ impl Rewind {
         {
             self.crop = previous;
         }
-        self.crop_drag = None;
+        if self.crop_drag.take().is_some() {
+            self.remember();
+        }
         cx.notify();
     }
 
     fn reset_crop(&mut self, cx: &mut Context<Self>) {
         self.crop = None;
         self.crop_drag = None;
+        self.remember();
         cx.notify();
+    }
+
+    fn set_output(&mut self, output: Output, cx: &mut Context<Self>) {
+        self.output = output;
+        self.remember();
+        cx.notify();
+    }
+
+    /// Saves the format and crop for the next capture. Called once a change is
+    /// finished, not on every pointer move of a crop drag.
+    fn remember(&mut self) {
+        let result = settings::save(&Settings {
+            output: self.output,
+            crop: self.crop,
+        });
+        self.settings_error = result.err().map(|error| format!("settings not saved: {error}"));
+        if let Some(error) = &self.settings_error {
+            self.status = Some(Status::Error(error.clone()));
+        }
     }
 
     /// Moves the weight by how far the pointer travelled since the drag began:
@@ -2487,8 +2492,7 @@ impl Rewind {
                 switch.child(segment(output.label(), self.output == output).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |view, _: &MouseDownEvent, _window, cx| {
-                        view.output = output;
-                        cx.notify();
+                        view.set_output(output, cx)
                     }),
                 ))
             },

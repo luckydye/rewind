@@ -208,7 +208,9 @@ toolbar always floats down the left edge of the capture; `B` picks Ink, `E` the
 eraser, `[` / `]` change weight, `⌘Z` undoes and `⇧⌘Z` redoes. The crop tool
 has no Apply step: a rectangle counts as soon as it is drawn, and copies and
 exports use it right away. Drag it or its corners to adjust, Reset to remove it,
-Escape or another tool to put the crop tool down. Annotations are
+Escape or another tool to put the crop tool down. The crop and the
+Image / MP4 / GIF choice carry over to the next capture, and across restarts,
+via `overlay.json` beside the daemon's config; drawings do not. Annotations are
 normalised to the capture, so the preview, a copied image and an exported clip
 all get the same drawing: the UI rasterises the layer at native resolution,
 `rewindd` composites it into the copied frame, and annotated clips are

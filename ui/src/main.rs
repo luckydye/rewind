@@ -8,6 +8,7 @@ mod icons;
 mod ipc;
 mod paint;
 mod protocol;
+mod settings;
 mod signal;
 mod trace;
 
