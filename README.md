@@ -375,7 +375,7 @@ on both platforms, with a Windows `activate.rs` and a different transport.
 
 ```powershell
 .\scripts\windows.ps1 bundle      # dist\Rewind\: Rewind.exe, rewindd.exe, rewindctl.exe, rewind-ui.exe
-.\scripts\windows.ps1 install     # %LOCALAPPDATA%\Programs\Rewind, Start at Login, started
+.\scripts\windows.ps1 install     # %LOCALAPPDATA%\Programs\Rewind, Start Menu, Start at Login, started
 .\scripts\windows.ps1 uninstall
 ```
 

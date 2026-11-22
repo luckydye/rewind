@@ -5,7 +5,7 @@
 
 .EXAMPLE
     .\scripts\windows.ps1 bundle      # dist\Rewind\ with all four executables
-    .\scripts\windows.ps1 install     # %LOCALAPPDATA%\Programs\Rewind, Start at Login, started
+    .\scripts\windows.ps1 install     # %LOCALAPPDATA%\Programs\Rewind, Start Menu, Start at Login, started
     .\scripts\windows.ps1 uninstall
 #>
 param(
@@ -36,6 +36,19 @@ function Stop-Rewind {
     # Stop-Process returns before the process is gone, and its executable
     # stays locked until then, so the copy that follows could fail.
     $running | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
+}
+
+$shortcut = Join-Path ([Environment]::GetFolderPath("Programs")) "Rewind.lnk"
+
+# Start Menu entry, so Rewind can be started again after quitting from the tray.
+function Install-Shortcut {
+    $shell = New-Object -ComObject WScript.Shell
+    $link = $shell.CreateShortcut($shortcut)
+    $link.TargetPath = Join-Path $target "Rewind.exe"
+    $link.WorkingDirectory = $target
+    $link.IconLocation = (Join-Path $target "Rewind.exe") + ",0"
+    $link.Description = "Rewind: replay and clip the last minute of your screen"
+    $link.Save()
 }
 
 function Invoke-Cargo([string]$crate) {
@@ -78,6 +91,8 @@ switch ($Action) {
             }
         }
         Write-Host "installed $target"
+        Install-Shortcut
+        Write-Host "start menu: $shortcut"
         & (Join-Path $target "rewindd.exe") login-item on
         Start-Process (Join-Path $target "Rewind.exe")
         Write-Host "Rewind is running. Alt+Shift+S opens it; the tray icon may start in the overflow (^)."
@@ -85,6 +100,7 @@ switch ($Action) {
     "uninstall" {
         if (Test-Path (Join-Path $target "rewindd.exe")) { & (Join-Path $target "rewindd.exe") login-item off }
         Stop-Rewind
+        Remove-Item -Force $shortcut -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force $target -ErrorAction SilentlyContinue
         Write-Host "removed $target"
     }
