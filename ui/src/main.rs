@@ -3,6 +3,9 @@ mod activate;
 #[cfg(windows)]
 #[path = "activate_windows.rs"]
 mod activate;
+#[cfg(target_os = "linux")]
+#[path = "activate_linux.rs"]
+mod activate;
 mod app;
 mod icons;
 mod ipc;

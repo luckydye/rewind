@@ -797,6 +797,13 @@ impl Rewind {
         if self.toast.is_some() && !self.overlay_open {
             self.show_toast(cx);
         }
+        // Wayland has no window to hide and no resident overlay: the process
+        // is the window. A pending toast keeps it alive a little longer.
+        #[cfg(target_os = "linux")]
+        if self.toast.is_none() {
+            crate::signal::stop_pausing();
+            std::process::exit(0);
+        }
         cx.notify();
     }
 
@@ -851,6 +858,11 @@ impl Rewind {
             // Back to covering the display while hidden, so the next show
             // opens at full size; outside an update, as in `show_toast`.
             self.restore_overlay_size(cx);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            crate::signal::stop_pausing();
+            std::process::exit(0);
         }
         cx.notify();
     }
@@ -3312,12 +3324,25 @@ fn reveal(path: &str) {
         .spawn();
 }
 
+/// Wayland has no standard "reveal in file manager"; opening the folder is the
+/// closest thing every desktop repository implements.
+#[cfg(target_os = "linux")]
+fn reveal(path: &str) {
+    let parent = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
+    let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+}
+
 // MARK: - Entry
 
 /// The overlay stays resident so the hotkey only has to show a window that
 /// already exists. A resident process costs nothing while hidden if no frames
 /// are decoded, which is why the frame is dropped on hide.
 pub fn run(show: bool) {
+    // Wayland has no capture exclusion: keep the daemon's pause lease alive
+    // for as long as this overlay exists.
+    #[cfg(target_os = "linux")]
+    crate::signal::hold_capture_pause();
+
     Application::new().with_assets(crate::icons::Icons).run(move |cx| {
         let display = cx.primary_display();
         let bounds = display

@@ -63,10 +63,17 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 pub fn default_socket_path() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME is unset");
     PathBuf::from(home).join("Library/Application Support/Rewind/rewindd.sock")
+}
+
+/// Must match `paths::socket_path` in the Wayland daemon.
+#[cfg(target_os = "linux")]
+pub fn default_socket_path() -> PathBuf {
+    let runtime = std::env::var("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR is unset");
+    PathBuf::from(runtime).join("rewind/rewindd.sock")
 }
 
 /// Must match `paths::pipe_name` in the Windows daemon.

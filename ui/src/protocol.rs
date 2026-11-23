@@ -84,6 +84,9 @@ pub enum Command {
     CopyClip,
     #[serde(rename = "openUI")]
     OpenUi,
+    /// Linux/Wayland only: stop appending to the ring while the overlay is up.
+    PauseCapture,
+    ResumeCapture,
     Quit,
 }
 

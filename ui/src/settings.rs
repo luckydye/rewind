@@ -52,6 +52,15 @@ fn path() -> PathBuf {
     PathBuf::from(home).join("Library/Application Support/Rewind/overlay.json")
 }
 
+/// Beside the daemon's `config.json`, as on the other platforms.
+#[cfg(target_os = "linux")]
+fn path() -> PathBuf {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").expect("HOME is unset")).join(".config"));
+    config.join("rewind").join("overlay.json")
+}
+
 #[cfg(windows)]
 fn path() -> PathBuf {
     let app_data = std::env::var("APPDATA").expect("APPDATA is unset");
