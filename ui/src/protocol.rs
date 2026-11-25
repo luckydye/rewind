@@ -100,7 +100,7 @@ pub struct ClipRange {
 
 /// A rectangle of the capture, as fractions of its width and height, so it
 /// does not depend on whether the daemon decodes a preview or a native frame.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Crop {
     pub x: f64,

@@ -100,10 +100,11 @@ inside the overlay as status pills and a side panel, which was decoration.
 | Home / End | jump to the oldest frame / now |
 | I / O | set range start / end at the playhead |
 | A | select the whole buffer |
-| B | Ink brush |
-| E | eraser |
+| Q | Ink brush |
+| W | eraser |
+| E | crop tool |
 | [ / ] | thinner / thicker brush |
-| ⌘Z | undo the last stroke |
+| ⌘Z | undo the last edit |
 | ⇧⌘Z | redo |
 | Return / Copy | copy per the Image / MP4 / GIF switch, then close |
 | ⌘Return / Export | save per the switch: the frame as PNG, or the range |
@@ -123,11 +124,12 @@ than opening Finder unprompted, because stealing focus would break Escape.
 Drawing is one Ink brush with the same dynamics as the canvas: speed and pen
 pressure set the width, strokes are smoothed with a B-spline, and the first
 stretch of a mouse stroke grows in instead of starting as a blob. The drawing
-toolbar always floats down the left edge of the capture; `B` picks Ink, `E` the
-eraser, `[` / `]` change weight, `⌘Z` undoes and `⇧⌘Z` redoes. The crop tool
-has no Apply step: a rectangle counts as soon as it is drawn, and copies and
-exports use it right away. Drag it or its corners to adjust, Reset to remove it,
-Escape or another tool to put the crop tool down. The crop and the
+toolbar always floats down the left edge of the capture; `Q` picks Ink, `W` the
+eraser, `E` the crop tool, `[` / `]` change weight, `⌘Z` undoes the last
+stroke or crop change, and `⇧⌘Z` redoes it. The crop tool has no Apply step: a
+rectangle counts as soon as it is drawn, and copies and exports use it right
+away. Drag it or its corners to adjust, Reset to remove it, Escape or another
+tool to put the crop tool down. The crop and the
 Image / MP4 / GIF choice carry over to the next capture, and across restarts,
 via `overlay.json` beside the daemon's config; drawings do not. Annotations are
 normalised to the capture, so the preview, a copied image and an exported clip

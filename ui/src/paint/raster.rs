@@ -170,16 +170,14 @@ impl Paint {
         self.strokes.is_empty()
     }
 
-    pub fn can_undo(&self) -> bool {
-        !self.strokes.is_empty()
-    }
-
-    pub fn can_redo(&self) -> bool {
-        !self.undone.is_empty()
-    }
-
     pub fn push(&mut self, stroke: Stroke) {
         self.strokes.push(stroke);
+        self.undone.clear();
+    }
+
+    /// Drops redoable strokes after another kind of edit took their place in
+    /// the shared history.
+    pub fn discard_redo(&mut self) {
         self.undone.clear();
     }
 

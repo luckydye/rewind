@@ -186,6 +186,14 @@ enum CropDrag {
     Resize { handle: CropHandle, start: Crop },
 }
 
+/// One reversible edit. Strokes are kept by `Paint`; this only records their
+/// place in the timeline next to crop changes.
+#[derive(Clone, Copy)]
+enum HistoryAction {
+    Stroke,
+    Crop { before: Option<Crop>, after: Option<Crop> },
+}
+
 /// How near a handle a press counts as grabbing it, in points.
 const CROP_HANDLE_REACH: f32 = 12.0;
 /// The square drawn on each edge and corner of the crop.
@@ -332,6 +340,10 @@ pub struct Rewind {
     /// Completed annotations and the stroke currently under the pointer, in
     /// normalised capture coordinates so they can render at any size.
     paint: Paint,
+    /// Reversible edits in order. A stroke entry defers to `Paint` for the
+    /// data; a crop entry carries both ends so the change can be reapplied.
+    undo_history: Vec<HistoryAction>,
+    redo_history: Vec<HistoryAction>,
     live: Option<StrokeSession>,
     live_started: Option<Instant>,
     /// The annotations, painted over the preview. Rebuilt when a stroke moves.
@@ -412,6 +424,8 @@ impl Rewind {
             color_chosen: false,
             brush_width: DEFAULT_BRUSH_WIDTH,
             paint: Paint::new(),
+            undo_history: Vec::new(),
+            redo_history: Vec::new(),
             live: None,
             live_started: None,
             overlay: None,
@@ -478,6 +492,8 @@ impl Rewind {
         self.closing = false;
         self.copy_failed = false;
         self.paint.clear();
+        self.undo_history.clear();
+        self.redo_history.clear();
         self.live = None;
         self.live_started = None;
         self.overlay = None;
@@ -1058,6 +1074,9 @@ impl Rewind {
 
     /// Back to drawing; the crop stays as it is.
     fn end_crop(&mut self, cx: &mut Context<Self>) {
+        if self.crop_drag.is_some() {
+            self.crop_up(cx);
+        }
         self.cropping = false;
         self.crop_drag = None;
         cx.notify();
@@ -1184,22 +1203,38 @@ impl Rewind {
     /// A press that never moved is not a crop; the rectangle that was there
     /// before it stays.
     fn crop_up(&mut self, cx: &mut Context<Self>) {
-        if let Some(CropDrag::New { previous, .. }) = self.crop_drag
+        let Some(drag) = self.crop_drag else {
+            return;
+        };
+        if let CropDrag::New { previous, .. } = drag
             && self
                 .crop
                 .is_some_and(|crop| crop.width < MIN_CROP || crop.height < MIN_CROP)
         {
             self.crop = previous;
         }
-        if self.crop_drag.take().is_some() {
-            self.remember();
+        let before = match drag {
+            CropDrag::New { previous, .. } => previous,
+            CropDrag::Move { start, .. } | CropDrag::Resize { start, .. } => Some(start),
+        };
+        self.crop_drag = None;
+        if self.crop != before {
+            self.record(HistoryAction::Crop {
+                before,
+                after: self.crop,
+            });
         }
+        self.remember();
         cx.notify();
     }
 
     fn reset_crop(&mut self, cx: &mut Context<Self>) {
+        let before = self.crop;
         self.crop = None;
         self.crop_drag = None;
+        if before.is_some() {
+            self.record(HistoryAction::Crop { before, after: None });
+        }
         self.remember();
         cx.notify();
     }
@@ -1251,21 +1286,59 @@ impl Rewind {
         cx.notify();
     }
 
-    fn undo_stroke(&mut self, cx: &mut Context<Self>) {
+    /// Records a reversible edit and drops the redo branch. A crop change also
+    /// drops redoable strokes, since the two share one timeline.
+    fn record(&mut self, action: HistoryAction) {
+        self.undo_history.push(action);
+        self.redo_history.clear();
+        self.paint.discard_redo();
+    }
+
+    fn undo(&mut self, cx: &mut Context<Self>) {
         if self.live.take().is_some() {
             self.live_started = None;
             self.drop_live_overlay();
-        } else {
-            self.paint.undo();
+            self.rebuild_overlay(cx);
+            return;
         }
-        self.rebuild_overlay(cx);
+        let Some(action) = self.undo_history.pop() else {
+            return;
+        };
+        self.crop_drag = None;
+        match action {
+            HistoryAction::Stroke => {
+                self.paint.undo();
+                self.rebuild_overlay(cx);
+            }
+            HistoryAction::Crop { before, .. } => {
+                self.crop = before;
+                self.remember();
+                cx.notify();
+            }
+        }
+        self.redo_history.push(action);
     }
 
-    fn redo_stroke(&mut self, cx: &mut Context<Self>) {
-        if self.live.is_none() {
-            self.paint.redo();
-            self.rebuild_overlay(cx);
+    fn redo(&mut self, cx: &mut Context<Self>) {
+        if self.live.is_some() {
+            return;
         }
+        let Some(action) = self.redo_history.pop() else {
+            return;
+        };
+        self.crop_drag = None;
+        match action {
+            HistoryAction::Stroke => {
+                self.paint.redo();
+                self.rebuild_overlay(cx);
+            }
+            HistoryAction::Crop { after, .. } => {
+                self.crop = after;
+                self.remember();
+                cx.notify();
+            }
+        }
+        self.undo_history.push(action);
     }
 
     /// On-screen size of the annotation layer. Normalised strokes make the
@@ -1422,6 +1495,7 @@ impl Rewind {
         };
         self.live_started = None;
         self.paint.push(live.finish());
+        self.record(HistoryAction::Stroke);
         self.drop_live_overlay();
         self.rebuild_overlay(cx);
     }
@@ -1929,12 +2003,13 @@ impl Rewind {
             "i" => self.mark_start(cx),
             "o" => self.mark_end(cx),
             "a" => self.reset_range(cx),
-            "b" => self.select_eraser(false, cx),
-            "e" => self.select_eraser(true, cx),
+            "q" => self.select_eraser(false, cx),
+            "w" => self.select_eraser(true, cx),
+            "e" => self.begin_crop(cx),
             "[" | "bracketleft" => self.nudge_brush_width(-1.0, cx),
             "]" | "bracketright" => self.nudge_brush_width(1.0, cx),
-            "z" if modifiers.platform && modifiers.shift => self.redo_stroke(cx),
-            "z" if modifiers.platform => self.undo_stroke(cx),
+            "z" if modifiers.platform && modifiers.shift => self.redo(cx),
+            "z" if modifiers.platform => self.undo(cx),
             _ => return,
         }
         // Reporting the key as handled is what stops AppKit offering it again:
@@ -2600,16 +2675,16 @@ impl Rewind {
                 ),
             );
 
-        let can_undo = self.live.is_some() || self.paint.can_undo();
-        let can_redo = self.live.is_none() && self.paint.can_redo();
+        let can_undo = self.live.is_some() || !self.undo_history.is_empty();
+        let can_redo = self.live.is_none() && !self.redo_history.is_empty();
         let history = toolbar_pill()
             .child(tool_button(icons::UNDO, false, can_undo).on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.undo_stroke(cx)),
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.undo(cx)),
             ))
             .child(tool_button(icons::REDO, false, can_redo).on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.redo_stroke(cx)),
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| view.redo(cx)),
             ));
 
         let fill = SLIDER_HEIGHT * self.weight_fraction();

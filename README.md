@@ -76,6 +76,7 @@ rewindd
 | Open | `⌘⇧S` | `Alt+Shift+S` |
 | Play / pause | `Space` | `Space` |
 | Frame back / forward | `←` / `→` | `←` / `→` |
+| Ink / eraser / crop | `Q` / `W` / `E` | `Q` / `W` / `E` |
 | Copy | `Return` | `Return` |
 | Export | `⌘Return` | `Ctrl+Return` |
 | Close | `Escape` | `Escape` |
