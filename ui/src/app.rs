@@ -149,13 +149,29 @@ enum EdgeMode {
     Last,
 }
 
-/// Which corner of a crop a drag is pulling.
+/// Which edge or corner of a crop a drag is pulling.
 #[derive(Clone, Copy, PartialEq)]
 enum CropHandle {
     TopLeft,
+    Top,
     TopRight,
-    BottomLeft,
+    Right,
     BottomRight,
+    Bottom,
+    BottomLeft,
+    Left,
+}
+
+impl CropHandle {
+    /// The cursor that says what grabbing this handle would do.
+    fn cursor(self) -> CursorStyle {
+        match self {
+            CropHandle::TopLeft | CropHandle::BottomRight => CursorStyle::ResizeUpLeftDownRight,
+            CropHandle::TopRight | CropHandle::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
+            CropHandle::Top | CropHandle::Bottom => CursorStyle::ResizeUpDown,
+            CropHandle::Left | CropHandle::Right => CursorStyle::ResizeLeftRight,
+        }
+    }
 }
 
 /// What a press on the preview does in crop mode.
@@ -166,12 +182,14 @@ enum CropDrag {
     New { anchor: (f64, f64), previous: Option<Crop> },
     /// Moving the rectangle as it was.
     Move { anchor: (f64, f64), start: Crop },
-    /// Pulling one corner of the rectangle as it was.
+    /// Pulling one edge or corner of the rectangle as it was.
     Resize { handle: CropHandle, start: Crop },
 }
 
-/// How near a corner a press counts as grabbing it, in points.
+/// How near a handle a press counts as grabbing it, in points.
 const CROP_HANDLE_REACH: f32 = 12.0;
+/// The square drawn on each edge and corner of the crop.
+const CROP_HANDLE_SIZE: f32 = 8.0;
 const MIN_CROP: f64 = 0.02;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -386,7 +404,7 @@ impl Rewind {
             colors_open: false,
             crop: remembered.crop,
             crop_drag: None,
-            cropping: false,
+            cropping: true,
             exiting: false,
             exit_progress: 0.0,
             fade_generation: 0,
@@ -465,7 +483,9 @@ impl Rewind {
         self.overlay = None;
         self.live_overlay = None;
         self.draw_eraser = false;
-        self.cropping = false;
+        // The crop tool is the default: cropping is the first thing most
+        // captures want, and drawing is one click away.
+        self.cropping = true;
         self.crop_drag = None;
         self.request_frame(cx);
         self.request_edge_frames(cx);
@@ -1052,15 +1072,20 @@ impl Rewind {
         )
     }
 
-    /// The corner of `crop` within reach of the pointer, in preview points.
+    /// The handle of `crop` within reach of the pointer, in preview points.
     fn crop_handle_at(&self, crop: Crop, x: f64, y: f64) -> Option<CropHandle> {
         let (width, height) = (self.stage_image.2 as f64, self.stage_image.3 as f64);
         let reach = CROP_HANDLE_REACH as f64;
+        let (mid_x, mid_y) = (crop.x + crop.width / 2.0, crop.y + crop.height / 2.0);
         [
             (CropHandle::TopLeft, crop.x, crop.y),
             (CropHandle::TopRight, crop.x + crop.width, crop.y),
             (CropHandle::BottomLeft, crop.x, crop.y + crop.height),
             (CropHandle::BottomRight, crop.x + crop.width, crop.y + crop.height),
+            (CropHandle::Top, mid_x, crop.y),
+            (CropHandle::Right, crop.x + crop.width, mid_y),
+            (CropHandle::Bottom, mid_x, crop.y + crop.height),
+            (CropHandle::Left, crop.x, mid_y),
         ]
         .into_iter()
         .find(|(_, cx, cy)| {
@@ -1126,18 +1151,22 @@ impl Rewind {
                         left = x.min(right - MIN_CROP);
                         top = y.min(bottom - MIN_CROP);
                     }
+                    CropHandle::Top => top = y.min(bottom - MIN_CROP),
                     CropHandle::TopRight => {
                         right = x.max(left + MIN_CROP);
                         top = y.min(bottom - MIN_CROP);
                     }
-                    CropHandle::BottomLeft => {
-                        left = x.min(right - MIN_CROP);
-                        bottom = y.max(top + MIN_CROP);
-                    }
+                    CropHandle::Right => right = x.max(left + MIN_CROP),
                     CropHandle::BottomRight => {
                         right = x.max(left + MIN_CROP);
                         bottom = y.max(top + MIN_CROP);
                     }
+                    CropHandle::Bottom => bottom = y.max(top + MIN_CROP),
+                    CropHandle::BottomLeft => {
+                        left = x.min(right - MIN_CROP);
+                        bottom = y.max(top + MIN_CROP);
+                    }
+                    CropHandle::Left => left = x.min(right - MIN_CROP),
                 }
                 let (left, right) = (left.clamp(0.0, 1.0), right.clamp(0.0, 1.0));
                 let (top, bottom) = (top.clamp(0.0, 1.0), bottom.clamp(0.0, 1.0));
@@ -2236,6 +2265,19 @@ impl Render for Rewind {
                                 .child(shade_rect(0.0, y0 + h, image_width, image_height - y0 - h, shade))
                                 .child(shade_rect(0.0, y0, x0, h, shade))
                                 .child(shade_rect(x0 + w, y0, image_width - x0 - w, h, shade))
+                                // A dark hairline behind the white one keeps the
+                                // crop readable on bright captures without making
+                                // the line itself heavier.
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left(px(x0 - 1.0))
+                                        .top(px(y0 - 1.0))
+                                        .w(px(w + 2.0))
+                                        .h(px(h + 2.0))
+                                        .border_1()
+                                        .border_color(rgba(0x00000059)),
+                                )
                                 .child(
                                     div()
                                         .absolute()
@@ -2243,19 +2285,56 @@ impl Render for Rewind {
                                         .top(px(y0))
                                         .w(px(w))
                                         .h(px(h))
-                                        .border_2()
+                                        .border_1()
                                         .border_color(rgba(0xFFFFFFFF)),
                                 );
                             if self.cropping {
-                                for (hx, hy) in [(x0, y0), (x0 + w, y0), (x0, y0 + h), (x0 + w, y0 + h)] {
+                                let moving = matches!(self.crop_drag, Some(CropDrag::Move { .. }));
+                                view = view.child(
+                                    div()
+                                        .absolute()
+                                        .left(px(x0))
+                                        .top(px(y0))
+                                        .w(px(w))
+                                        .h(px(h))
+                                        .cursor(if moving {
+                                            CursorStyle::ClosedHand
+                                        } else {
+                                            CursorStyle::OpenHand
+                                        }),
+                                );
+                                let (mid_x, mid_y) = (x0 + w / 2.0, y0 + h / 2.0);
+                                let handles = [
+                                    (CropHandle::TopLeft, x0, y0),
+                                    (CropHandle::Top, mid_x, y0),
+                                    (CropHandle::TopRight, x0 + w, y0),
+                                    (CropHandle::Right, x0 + w, mid_y),
+                                    (CropHandle::BottomRight, x0 + w, y0 + h),
+                                    (CropHandle::Bottom, mid_x, y0 + h),
+                                    (CropHandle::BottomLeft, x0, y0 + h),
+                                    (CropHandle::Left, x0, mid_y),
+                                ];
+                                for (handle, hx, hy) in handles {
+                                    // The grab area is the reach the press test
+                                    // uses, so the cursor agrees with the drag.
                                     view = view.child(
                                         div()
                                             .absolute()
-                                            .left(px(hx - 4.0))
-                                            .top(px(hy - 4.0))
-                                            .size(px(8.0))
-                                            .rounded_full()
-                                            .bg(rgba(0xFFFFFFFF)),
+                                            .left(px(hx - CROP_HANDLE_REACH))
+                                            .top(px(hy - CROP_HANDLE_REACH))
+                                            .size(px(CROP_HANDLE_REACH * 2.0))
+                                            .cursor(handle.cursor())
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .left(px(CROP_HANDLE_REACH - CROP_HANDLE_SIZE / 2.0))
+                                                    .top(px(CROP_HANDLE_REACH - CROP_HANDLE_SIZE / 2.0))
+                                                    .size(px(CROP_HANDLE_SIZE))
+                                                    .rounded(px(1.0))
+                                                    .bg(rgba(0xFFFFFFFF))
+                                                    .border_1()
+                                                    .border_color(rgba(0x00000040)),
+                                            ),
                                     );
                                 }
                             }
@@ -2272,6 +2351,7 @@ impl Render for Rewind {
                                 }
                             }),
                         )
+                        .when(self.cropping, |this| this.cursor(CursorStyle::Crosshair))
                         .into_any_element()
                 }
 
@@ -2308,7 +2388,7 @@ impl Render for Rewind {
             - (1.0 - bar_progress) * (TOOLBAR_WIDTH + MARGIN * 2.0)
             - exit_ease * (TOOLBAR_WIDTH + MARGIN * 2.0);
         let palette = self.brush_palette(toolbar_left, toolbar_top, cx);
-        let crop_pill = self.cropping.then(|| self.crop_actions(bar_top, cx));
+        let crop_pill = self.cropping.then(|| self.crop_actions(bar_top));
 
         // Moves and releases are handled on the root, which covers the whole
         // window, so a drag keeps tracking after the pointer leaves the bar.
@@ -2460,9 +2540,9 @@ impl Rewind {
             .into_any_element()
     }
 
-    /// The hint while the crop tool is selected. A drawn crop is already in
-    /// effect, so the only action is taking it away.
-    fn crop_actions(&self, bar_top: f32, cx: &mut Context<Self>) -> AnyElement {
+    /// The hint while the crop tool is selected. The crop itself, and taking it
+    /// away, live in the bar, so this only explains how to draw or adjust it.
+    fn crop_actions(&self, bar_top: f32) -> AnyElement {
         let hint = if self.crop.is_some() {
             "Drag the crop or its corners · Esc to draw"
         } else {
@@ -2488,15 +2568,7 @@ impl Rewind {
                             .text_xs()
                             .text_color(rgba(MUTED))
                             .child(hint),
-                    )
-                    .when(self.crop.is_some(), |pill| {
-                        pill.child(label_button("Reset").on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|view, _: &MouseDownEvent, _window, cx| {
-                                view.reset_crop(cx)
-                            }),
-                        ))
-                    }),
+                    ),
             )
             .into_any_element()
     }
@@ -2788,6 +2860,27 @@ impl Rewind {
             },
         );
 
+        // The crop stays in effect while drawing, so its reset must not hide
+        // behind the crop tool being selected.
+        let crop_chip = self.crop.map(|_| {
+            group()
+                .child(
+                    div()
+                        .pl(px(8.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_xs()
+                        .text_color(rgba(MUTED))
+                        .child(svg().path(icons::CROP).size(px(12.0)).text_color(rgba(MUTED)))
+                        .child("Cropped"),
+                )
+                .child(label_button("Reset").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|view, _: &MouseDownEvent, _window, cx| view.reset_crop(cx)),
+                ))
+        });
+
         let secondary = secondary_button("Copy", "Enter", self.busy == Some(Busy::Copy))
             .on_mouse_down(
                 MouseButton::Left,
@@ -2804,6 +2897,7 @@ impl Rewind {
             .flex()
             .items_center()
             .gap(px(4.0))
+            .when_some(crop_chip, |this, chip| this.child(chip))
             .child(output_switch)
             .child(secondary)
             .child(
