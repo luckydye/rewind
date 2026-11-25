@@ -34,13 +34,51 @@ jobs:
           shasum -a 256 "dist/Rewind-${GITHUB_REF_NAME}-macos-arm64.zip" \
             > "dist/Rewind-${GITHUB_REF_NAME}-macos-arm64.zip.sha256"
 
-      # Re-running a tag build uploads over the existing assets instead of
-      # failing on an already-published release.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rewind-macos-arm64
+          path: dist/Rewind-*.zip*
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same bundle path used locally: win + ui in release, all four
+      # executables copied into dist\Rewind.
+      - name: Build the bundle
+        run: ./scripts/windows.ps1 bundle
+
+      - name: Archive the bundle
+        shell: pwsh
+        run: |
+          $zip = "dist/Rewind-$env:GITHUB_REF_NAME-windows-x64.zip"
+          Compress-Archive -Path dist/Rewind -DestinationPath $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  $(Split-Path $zip -Leaf)" | Out-File "$zip.sha256" -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rewind-windows-x64
+          path: dist/Rewind-*.zip*
+
+  # One job publishes both builds, so the two platforms never race to create
+  # the release. Re-running a tag build replaces the assets.
+  release:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
-          gh release upload "$GITHUB_REF_NAME" \
-            dist/Rewind-*.zip dist/Rewind-*.zip.sha256 --clobber
+          gh release upload "$GITHUB_REF_NAME" assets/* --clobber
