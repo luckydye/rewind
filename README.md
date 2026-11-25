@@ -20,6 +20,10 @@
   <img src="https://img.shields.io/badge/100%25-local-2ea44f?style=flat-square" alt="100% local">
 </p>
 
+<p align="center">
+  <img src="docs/assets/screenshots/overlay.png" alt="The Rewind overlay over a captured screen">
+</p>
+
 Rewind keeps a rolling buffer of your screen in memory. There is no record
 button, no growing file on disk, and no cloud upload.
 
