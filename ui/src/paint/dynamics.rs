@@ -153,6 +153,13 @@ pub fn width_from_velocity(velocity: f64, base_width: f64) -> f64 {
     base_width * (SLOW_WIDTH_FACTOR + factor * (FAST_WIDTH_FACTOR - SLOW_WIDTH_FACTOR))
 }
 
+/// The width of a mark that never moved. Zero velocity there means "no
+/// movement to measure", not "the slowest possible sweep", so a tap is the
+/// light dip at the fast end of the curve rather than the widest stroke.
+pub fn tap_width(base_width: f64) -> f64 {
+    base_width * FAST_WIDTH_FACTOR
+}
+
 pub fn velocity_width(action: &mut BrushAction) -> f64 {
     if let Some(measured) = gesture_velocity(action) {
         action.velocity = measured;

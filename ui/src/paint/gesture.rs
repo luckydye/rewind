@@ -6,8 +6,8 @@
 use super::dynamics::{
     CURVE_FLATNESS, MAX_CURVE_DEPTH, MAX_STROKE_SMOOTHING_RADIUS, MINIMUM_POINT_DISTANCE,
     ORIENTATION_SAMPLE_DELTA, PRESSURE_SAMPLE_DELTA, density_for_point, eased_stroke_width,
-    initial_velocity_is_ready, orientation_change, smoothed_point_at, tip_width_for_point,
-    velocity_width,
+    initial_velocity_is_ready, orientation_change, smoothed_point_at, tap_width,
+    tip_width_for_point, velocity_width,
 };
 use super::math::{blend_reading, blend_turns, clamp, interpolate};
 use super::stamps::{BrushTip, create_brush_mark};
@@ -119,7 +119,7 @@ impl Gesture {
                 let width = tip_width_for_point(
                     &self.action,
                     self.action.points[0],
-                    self.action.brush.width,
+                    tap_width(self.action.brush.width),
                 );
                 self.action.points[0].strength = Some(width);
                 self.paint_dot(width, sink);
@@ -197,7 +197,13 @@ impl Gesture {
 
     fn paint_buffered_stroke_start(&mut self, sink: &mut impl MarkSink) {
         let action = &mut self.action;
-        let initial = velocity_width(action);
+        // Too short to measure is a tap, not the slow end of the curve: use
+        // the light width instead of letting a zero velocity read as widest.
+        let initial = if initial_velocity_is_ready(action) {
+            velocity_width(action)
+        } else {
+            tap_width(action.brush.width)
+        };
         let widths: Vec<f64> = action
             .points
             .iter()
