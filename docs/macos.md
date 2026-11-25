@@ -52,8 +52,11 @@ make daemon                 # menu bar item + socket, records immediately
 ```
 
 Menu bar: buffered seconds, start/stop, capture source (a display, or a single
-application), start at login, quit. The login item only appears in a bundled
-build, since `SMAppService.mainApp` needs a bundle identifier.
+application), buffer length (30 seconds, 1 minute, 2 minutes, or 5 minutes),
+start at login, quit. The login item only appears in a bundled build, since
+`SMAppService.mainApp` needs a bundle identifier. The ring's 512 MB cap still
+bounds memory, so a 2-minute setting can hold less than two minutes on very
+high-bitrate captures.
 
 Configuration is persisted to `~/Library/Application Support/Rewind/config.json`
 and restored on launch.

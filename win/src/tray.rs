@@ -43,6 +43,7 @@ const ID_CLIPS: usize = 12;
 const ID_LOGIN: usize = 13;
 const ID_QUIT: usize = 14;
 const ID_DISPLAY: usize = 100;
+const ID_BUFFER: usize = 1000;
 
 struct Tray {
     recorder: Arc<Recorder>,
@@ -207,6 +208,18 @@ fn status_line() -> String {
     }
 }
 
+fn buffer_title(seconds: usize) -> String {
+    if seconds < 60 {
+        return format!("{seconds} seconds");
+    }
+    let minutes = seconds / 60;
+    if minutes == 1 {
+        "1 minute".into()
+    } else {
+        format!("{minutes} minutes")
+    }
+}
+
 /// Once a second: tooltip, and the icon when recording starts or stops.
 fn refresh(hwnd: HWND) {
     let state = tray().recorder.state();
@@ -255,6 +268,15 @@ fn show_menu(hwnd: HWND, x: i32, y: i32) {
             }
             append(menu, MF_POPUP, capture.0 as usize, "Capture");
         }
+
+        if let Ok(buffer) = CreatePopupMenu() {
+            for seconds in [30, 60, 120, 300] {
+                let checked = (state.config.buffer_seconds - seconds as f64).abs() < 0.5;
+                let flags = if checked { MF_STRING | MF_CHECKED } else { MF_STRING };
+                append(buffer, flags, ID_BUFFER + seconds, &buffer_title(seconds));
+            }
+            append(menu, MF_POPUP, buffer.0 as usize, "Buffer");
+        }
         append(menu, MF_STRING, ID_CLIPS, "Show Clips Folder");
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let login_flags = if login::is_enabled() { MF_CHECKED } else { MF_UNCHECKED };
@@ -291,6 +313,13 @@ fn show_menu(hwnd: HWND, x: i32, y: i32) {
             }
             ID_QUIT => {
                 let _ = DestroyWindow(hwnd);
+            }
+            id if id >= ID_BUFFER => {
+                let mut config = state.config.clone();
+                config.buffer_seconds = (id - ID_BUFFER) as f64;
+                std::thread::spawn(move || {
+                    tray().recorder.apply(config);
+                });
             }
             id if id >= ID_DISPLAY => {
                 let mut config = state.config.clone();

@@ -59,7 +59,10 @@ rewindctl export --format png --at 2.5
 rewindctl export --crop 0.1,0.1,0.5,0.5 --overlay marks.rgba
 rewindctl preview --ago 2 --width 1280 --out frame.bmp
 rewindctl config --fps 15 --height 600
+rewindctl config --buffer 120
 ```
+
+`--buffer` is in seconds; 60 is the default. The 512 MB ring cap still applies.
 
 The first start opens the portal's picker. Its answer is remembered as a
 restore token in `$XDG_CONFIG_HOME/rewind/portal-token`, so the next launch

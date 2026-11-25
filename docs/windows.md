@@ -28,7 +28,8 @@ goes there, and it finds `ui\target\<profile>\rewind-ui.exe` on its own.
 so the annotation path can be tested without drawing anything. Without `--out`
 it only reports timing.
 
-The overlay opens with **Alt+Shift+S**.
+The overlay opens with **Alt+Shift+S**. The tray menu also has buffer presets:
+30 seconds, 1 minute, 2 minutes, and 5 minutes.
 
 ## How it maps to macOS
 

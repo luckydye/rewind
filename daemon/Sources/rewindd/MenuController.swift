@@ -87,6 +87,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(open)
 
         menu.addItem(captureMenu())
+        menu.addItem(bufferMenu())
         menu.addItem(.separator())
 
         if LoginItem.isSupported {
@@ -173,6 +174,34 @@ final class MenuController: NSObject, NSMenuDelegate {
         return item
     }
 
+    private func bufferMenu() -> NSMenuItem {
+        let item = NSMenuItem(title: "Buffer", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        let current = snapshot?.config.bufferSeconds
+        for seconds in [30.0, 60.0, 120.0, 300.0] {
+            let entry = NSMenuItem(
+                title: bufferTitle(seconds),
+                action: #selector(selectBuffer),
+                keyEquivalent: ""
+            )
+            entry.target = self
+            entry.representedObject = seconds
+            entry.state = current == seconds ? .on : .off
+            submenu.addItem(entry)
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    private func bufferTitle(_ seconds: Double) -> String {
+        if seconds < 60 {
+            return "\(Int(seconds)) seconds"
+        }
+        let minutes = Int(seconds / 60)
+        return minutes == 1 ? "1 minute" : "\(minutes) minutes"
+    }
+
     private func header(_ title: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
@@ -211,6 +240,15 @@ final class MenuController: NSObject, NSMenuDelegate {
             var config = snapshot?.config
         else { return }
         config.applicationBundleID = bundleID
+        apply(config)
+    }
+
+    @objc func selectBuffer(_ sender: NSMenuItem) {
+        guard
+            let seconds = sender.representedObject as? Double,
+            var config = snapshot?.config
+        else { return }
+        config.bufferSeconds = seconds
         apply(config)
     }
 

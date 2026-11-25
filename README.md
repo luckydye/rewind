@@ -29,7 +29,7 @@ button, no growing file on disk, and no cloud upload.
 
 ## Features
 
-- **Always buffering**: a configurable ring, 60 seconds by default.
+- **Always buffering**: 30 seconds to 5 minutes, 60 seconds by default.
 - **Frame-accurate**: scrub, step frames, and set in and out points.
 - **Annotate and crop**: draw on the frame or crop it before exporting.
 - **PNG, MP4, or GIF**: Copy and Export both follow the selected format.
