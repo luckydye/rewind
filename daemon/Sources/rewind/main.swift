@@ -19,28 +19,28 @@ private enum ClientError: Error, CustomStringConvertible {
 }
 
 private func fail(_ message: String) -> Never {
-    FileHandle.standardError.write(Data("rewindctl: \(message)\n".utf8))
+    FileHandle.standardError.write(Data("rewind: \(message)\n".utf8))
     exit(1)
 }
 
 private func usage() -> Never {
     print(
         """
-        rewindctl — talk to a running rewindd
+        rewind — talk to a running rewindd
 
         USAGE:
-          rewindctl status [--json]
-          rewindctl start | stop | quit
-          rewindctl export [--seconds N | --from A --to B] [--out PATH]
-                           [--format mp4 | gif | png]
-                           [--gif-fps N] [--gif-width PX]   (gif: 15 fps, 1280 px)
-                           [--at SECONDS]                    (png: frame that long ago)
-                           [--overlay RGBA] [--crop x,y,w,h]
-          rewindctl copy   (same options as export, mp4 or gif; puts the file on the clipboard)
-          rewindctl config [--buffer S] [--fps N] [--height PX] [--display N]
-                           [--app BUNDLE_ID | --whole-screen] [--bitrate B]
-          rewindctl preview --ago SECONDS [--width PX] [--out clip.png]
-          rewindctl displays | apps
+          rewind status [--json]
+          rewind start | stop | quit
+          rewind export [--seconds N | --from A --to B] [--out PATH]
+                        [--format mp4 | gif | png]
+                        [--gif-fps N] [--gif-width PX]   (gif: 15 fps, 1280 px)
+                        [--at SECONDS]                   (png: frame that long ago)
+                        [--overlay RGBA] [--crop x,y,w,h]
+          rewind copy   (same options as export, mp4 or gif; puts the file on the clipboard)
+          rewind config [--buffer S] [--fps N] [--height PX] [--display N]
+                        [--app BUNDLE_ID | --whole-screen] [--bitrate B]
+          rewind preview --ago SECONDS [--width PX] [--out clip.png]
+          rewind displays | apps
         """
     )
     exit(0)
@@ -316,7 +316,7 @@ do {
         usage()
 
     default:
-        FileHandle.standardError.write(Data("rewindctl: unknown command '\(command)'\n".utf8))
+        FileHandle.standardError.write(Data("rewind: unknown command '\(command)'\n".utf8))
         usage()
     }
 } catch {

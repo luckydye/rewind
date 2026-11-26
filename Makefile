@@ -32,7 +32,7 @@ run: build
 	$(DEBUG)/rewindd run
 
 status: build
-	$(DEBUG)/rewindctl status
+	$(DEBUG)/rewind status
 
 list: build
 	$(DEBUG)/rewindd list

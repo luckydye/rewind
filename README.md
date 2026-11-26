@@ -65,7 +65,7 @@ The daemon and CLI work today. The overlay is not built yet.
 ```sh
 cd linux
 cargo build --release
-sudo cp target/release/{rewindd,rewindctl} /usr/local/bin/
+sudo cp target/release/{rewindd,rewind} /usr/local/bin/
 rewindd
 ```
 

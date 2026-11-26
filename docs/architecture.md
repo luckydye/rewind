@@ -14,7 +14,7 @@ Rewind is three pieces, each doing only what the others cannot.
 │ global hotkey (Carbon)           │         │ exits on Escape               │
 └──────────────────────────────────┘         └───────────────────────────────┘
                      ▲
-                     │  rewindctl (debugging)
+                     │  rewind (debugging)
 ```
 
 `rewindd` is the only process that exists while nothing is happening, so it

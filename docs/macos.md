@@ -14,7 +14,7 @@ GPUI overlay (`rewind-ui`). It requires macOS 15 or newer.
 ## Build and install
 
 ```sh
-make build      # rewindd + rewindctl (debug)
+make build      # rewindd + rewind (debug)
 make bundle     # dist/Rewind.app, ad-hoc signed, for the login item
 make doctor     # screen recording permission, display count, hardware encoder
 ```
@@ -64,14 +64,14 @@ and restored on launch.
 Debugging client — every daemon feature is reachable without touching the menu:
 
 ```sh
-rewindctl status
-rewindctl status --json
-rewindctl start | stop | quit
-rewindctl export --seconds 30 --out ~/Desktop/clip.mp4
-rewindctl export --seconds 10 --format gif [--gif-fps 15] [--gif-width 1280]
-rewindctl export --format png --at 2.5        # the frame 2.5 s ago
-rewindctl config --fps 30 --buffer 60 --display 0 --app com.apple.Safari
-rewindctl displays | apps
+rewind status
+rewind status --json
+rewind start | stop | quit
+rewind export --seconds 30 --out ~/Desktop/clip.mp4
+rewind export --seconds 10 --format gif [--gif-fps 15] [--gif-width 1280]
+rewind export --format png --at 2.5        # the frame 2.5 s ago
+rewind config --fps 30 --buffer 60 --display 0 --app com.apple.Safari
+rewind displays | apps
 ```
 
 Clips, GIFs and PNGs default to `~/Movies/Rewind/`.

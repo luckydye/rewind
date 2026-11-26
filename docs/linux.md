@@ -1,7 +1,7 @@
 # Linux (Wayland)
 
 `linux/` is the Wayland daemon, written in Rust like the Windows one. It
-speaks the same protocol, so `rewindctl` and (once its window code is wired)
+speaks the same protocol, so `rewind` and (once its window code is wired)
 `rewind-ui` are the same clients. This cut is the daemon and the CLI; the
 overlay, tray and hotkey are not built yet.
 
@@ -34,7 +34,7 @@ rustup default stable
 
 cd linux
 cargo build --release
-sudo cp target/release/rewindd target/release/rewindctl /usr/local/bin/
+sudo cp target/release/rewindd target/release/rewind /usr/local/bin/
 ```
 
 On Hyprland use `xdg-desktop-portal-hyprland` instead of `-wlr`; on GNOME use
@@ -51,15 +51,15 @@ rewindd doctor           # portal, PipeWire plugin, encoders, decoders
 rewindd list             # the screen being captured
 rewindd run --seconds 10 --export /tmp/clip.mp4
 
-rewindctl status
-rewindctl start | stop | quit
-rewindctl export --seconds 30 --out ~/Videos/clip.mp4
-rewindctl export --format gif --seconds 10
-rewindctl export --format png --at 2.5
-rewindctl export --crop 0.1,0.1,0.5,0.5 --overlay marks.rgba
-rewindctl preview --ago 2 --width 1280 --out frame.bmp
-rewindctl config --fps 15 --height 600
-rewindctl config --buffer 120
+rewind status
+rewind start | stop | quit
+rewind export --seconds 30 --out ~/Videos/clip.mp4
+rewind export --format gif --seconds 10
+rewind export --format png --at 2.5
+rewind export --crop 0.1,0.1,0.5,0.5 --overlay marks.rgba
+rewind preview --ago 2 --width 1280 --out frame.bmp
+rewind config --fps 15 --height 600
+rewind config --buffer 120
 ```
 
 `--buffer` is in seconds; 60 is the default. The 512 MB ring cap still applies.
@@ -72,7 +72,7 @@ config change restarts capture, which means the picker can appear again; the
 `setConfig` reply does not wait for it.
 
 `rewindd login-item on` writes `~/.config/autostart/rewind.desktop`. There is
-no global hotkey: bind `rewindctl start` (or a future `rewindctl open`) in the
+no global hotkey: bind `rewind start` (or a future `rewind open`) in the
 compositor's key binding settings, which is the supported Wayland way.
 
 ## How it maps to macOS
@@ -87,7 +87,7 @@ compositor's key binding settings, which is the supported Wayland way.
 | unix socket, mode 0600 | `$XDG_RUNTIME_DIR/rewind/rewindd.sock`, mode 0600 |
 | one byte on `ui.sock` | the same `ui.sock` path under the runtime dir |
 | menu bar item | none yet |
-| Carbon ⌘⇧S | none yet; bind `rewindctl` yourself |
+| Carbon ⌘⇧S | none yet; bind `rewind` yourself |
 | `NSPasteboard` | `wl-copy`: `text/uri-list` for a clip, `image/png` for a frame |
 | `~/Movies/Rewind` | `~/Videos/Rewind` |
 | `config.json` in Application Support | `$XDG_CONFIG_HOME/rewind/config.json` |

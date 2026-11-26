@@ -22,8 +22,10 @@ on both platforms, with a Windows `activate.rs` and a different transport.
 
 For development, run `win\target\debug\rewindd.exe` from a terminal: its log
 goes there, and it finds `ui\target\<profile>\rewind-ui.exe` on its own.
-`rewindctl` has the same commands as on macOS, plus `copy`, `copy-frame`,
-`thumbnails` and `preview --out frame.bmp`. `export`, `copy` and
+`rewindctl` has the same commands as `rewind` on macOS and Linux, plus `copy`,
+`copy-frame`, `thumbnails` and `preview --out frame.bmp`. It keeps the
+`rewindctl` name because `rewind.exe` would collide with the `Rewind.exe` app on
+a case-insensitive filesystem. `export`, `copy` and
 `copy-frame` take `--overlay <rgba file>` and `--crop x,y,w,h` (fractions),
 so the annotation path can be tested without drawing anything. Without `--out`
 it only reports timing.

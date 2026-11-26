@@ -1,5 +1,5 @@
 //! Debugging client: every daemon feature without touching the tray. Same
-//! commands as the macOS `rewindctl`.
+//! commands as the macOS `rewind`.
 
 use std::time::Instant;
 

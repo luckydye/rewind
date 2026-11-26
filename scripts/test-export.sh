@@ -5,10 +5,10 @@
 # inside the crop.
 #
 # Needs a running daemon (make build; daemon/.build/debug/rewindd), ffmpeg,
-# and a screen ffplay can draw on. Usage: scripts/test-export.sh [rewindctl]
+# and a screen ffplay can draw on. Usage: scripts/test-export.sh [rewind]
 set -euo pipefail
 
-CTL=${1:-daemon/.build/debug/rewindctl}
+CTL=${1:-daemon/.build/debug/rewind}
 OUT=$(mktemp -d /tmp/rewind-export.XXXXXX)
 FROM=6
 TO=1

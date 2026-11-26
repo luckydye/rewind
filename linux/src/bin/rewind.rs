@@ -1,5 +1,5 @@
 //! Debugging client: every daemon feature without touching the tray. Same
-//! commands as the macOS `rewindctl`.
+//! commands as the macOS `rewind`.
 
 use std::time::Instant;
 
@@ -7,20 +7,20 @@ use rewindd::protocol::{ClipRange, Command, Crop, ExportFormat, Reply, Request, 
 use rewindd::client;
 
 const USAGE: &str = "\
-rewindctl — talk to a running rewindd
+rewind — talk to a running rewindd
 
 USAGE:
-  rewindctl status [--json]
-  rewindctl start | stop | quit | open
-  rewindctl export [--seconds N | --from A --to B] [--out PATH] [--overlay RGBA] [--crop x,y,w,h]
-                   [--format mp4 | gif | png] [--gif-fps N] [--gif-width PX] [--at SECONDS]
-  rewindctl copy [--seconds N | --from A --to B] [--overlay RGBA] [--crop x,y,w,h]
-                 [--format mp4 | gif] [--gif-fps N] [--gif-width PX]
-  rewindctl copy-frame [--ago SECONDS] [--overlay RGBA] [--crop x,y,w,h]
-  rewindctl config [--buffer S] [--fps N] [--height PX] [--display N] [--bitrate B] [--cursor on|off]
-  rewindctl preview [--ago SECONDS] [--width PX] [--out frame.bmp]
-  rewindctl thumbnails [--count N] [--width PX]
-  rewindctl displays";
+  rewind status [--json]
+  rewind start | stop | quit | open
+  rewind export [--seconds N | --from A --to B] [--out PATH] [--overlay RGBA] [--crop x,y,w,h]
+                [--format mp4 | gif | png] [--gif-fps N] [--gif-width PX] [--at SECONDS]
+  rewind copy [--seconds N | --from A --to B] [--overlay RGBA] [--crop x,y,w,h]
+               [--format mp4 | gif] [--gif-fps N] [--gif-width PX]
+  rewind copy-frame [--ago SECONDS] [--overlay RGBA] [--crop x,y,w,h]
+  rewind config [--buffer S] [--fps N] [--height PX] [--display N] [--bitrate B] [--cursor on|off]
+  rewind preview [--ago SECONDS] [--width PX] [--out frame.bmp]
+  rewind thumbnails [--count N] [--width PX]
+  rewind displays";
 
 fn option(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
@@ -276,7 +276,7 @@ fn bmp(image: &rewindd::protocol::RawImage) -> Vec<u8> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Err(message) = run(&args) {
-        eprintln!("rewindctl: {message}");
+        eprintln!("rewind: {message}");
         std::process::exit(1);
     }
 }

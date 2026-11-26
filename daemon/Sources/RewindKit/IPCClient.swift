@@ -17,7 +17,7 @@ public enum IPCError: Error, CustomStringConvertible {
     }
 }
 
-/// Blocking client, used by `rewindctl`. The GPUI UI speaks the same protocol.
+/// Blocking client, used by `rewind`. The GPUI UI speaks the same protocol.
 public struct IPCClient {
     public let path: String
     public let timeout: TimeInterval

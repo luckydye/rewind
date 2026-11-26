@@ -1,4 +1,4 @@
-//! The client half of the socket, shared by `rewindctl` and `rewindd list`.
+//! The client half of the socket, shared by `rewind` and `rewindd list`.
 
 use std::io;
 use std::os::unix::net::UnixStream;

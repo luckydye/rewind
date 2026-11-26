@@ -6,7 +6,7 @@ let package = Package(
     platforms: [.macOS(.v15)],
     products: [
         .executable(name: "rewindd", targets: ["rewindd"]),
-        .executable(name: "rewindctl", targets: ["rewindctl"]),
+        .executable(name: "rewind", targets: ["rewind"]),
         .library(name: "RewindKit", targets: ["RewindKit"]),
     ],
     targets: [
@@ -22,9 +22,9 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(
-            name: "rewindctl",
+            name: "rewind",
             dependencies: ["RewindKit"],
-            path: "Sources/rewindctl",
+            path: "Sources/rewind",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

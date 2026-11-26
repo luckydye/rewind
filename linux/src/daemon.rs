@@ -1,6 +1,6 @@
 //! The resident daemon: socket server, recorder, supervisor. No tray and no
 //! global hotkey — Wayland has neither in a form a background process can rely
-//! on, so the desktop's own key binding calls `rewindctl` instead.
+//! on, so the desktop's own key binding calls `rewind` instead.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

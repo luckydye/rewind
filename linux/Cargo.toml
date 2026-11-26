@@ -13,8 +13,8 @@ name = "rewindd"
 path = "src/bin/rewindd.rs"
 
 [[bin]]
-name = "rewindctl"
-path = "src/bin/rewindctl.rs"
+name = "rewind"
+path = "src/bin/rewind.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

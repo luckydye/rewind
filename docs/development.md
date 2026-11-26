@@ -27,12 +27,12 @@ protocol described in [protocol.md](protocol.md).
 ## Make targets (macOS)
 
 ```sh
-make build       # rewind-ui + rewindd + rewindctl, debug
+make build       # rewind-ui + rewindd + rewind, debug
 make ui          # only the overlay, debug
 make ui-release  # only the overlay, release
 make daemon      # build, then run the menu bar daemon
 make run         # standalone capture, no menu bar
-make status      # rewindctl status against a running daemon
+make status      # rewind status against a running daemon
 make list        # capture sources
 make doctor      # screen recording permission, displays, hardware encoder
 make bundle      # dist/Rewind.app
