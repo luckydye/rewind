@@ -56,13 +56,14 @@ fn only_window() -> *mut c_void {
 /// version needs the handle.
 pub fn remember(_window: &gpui::Window) {}
 
-/// The Windows overlay uncloaks after its first frame is presented; AppKit's
-/// alpha fade covers the same moment, so there is nothing to do here.
-pub fn take_reveal() -> bool {
-    false
-}
+static REVEAL_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-pub fn reveal() {}
+/// A hidden window keeps its last drawn surface, so the fade waits for the
+/// render after `start_fade`: fading straight away showed one frame of the
+/// previous overlay first.
+pub fn take_reveal() -> bool {
+    REVEAL_PENDING.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
 
 /// The overlay stays resident between uses, so it must not sit in the Dock
 /// or the app switcher: NSApplicationActivationPolicyAccessory.
@@ -188,11 +189,17 @@ pub fn show_toast(screen: Option<(f64, f64, f64, f64)>, width: f64, height: f64,
 /// AppKit needs nothing undone: `activate` takes focus as usual.
 pub fn end_toast() {}
 
+/// Fades the window in once the next render has been presented; see
+/// `take_reveal`.
+pub fn start_fade() {
+    REVEAL_PENDING.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Cross-fades the window in. AppKit animates `alphaValue` in the window
 /// server, so this costs no frames in our render loop — driving it from a step
 /// task inside GPUI meant the overlay was painted once and then left at
 /// whatever opacity that first frame had.
-pub fn start_fade() {
+pub fn reveal() {
     unsafe {
         let window = only_window();
         let set_double: SendDouble = std::mem::transmute(objc_msgSend as *const ());
@@ -214,6 +221,7 @@ pub fn start_fade() {
 
 /// Starts the window fully transparent so `start_fade` has somewhere to go.
 pub fn prepare_fade() {
+    REVEAL_PENDING.store(false, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         let set_double: SendDouble = std::mem::transmute(objc_msgSend as *const ());
         set_double(only_window(), selector(c"setAlphaValue:"), 0.0);

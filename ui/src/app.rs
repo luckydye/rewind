@@ -503,10 +503,9 @@ impl Rewind {
         // captures want, and drawing is one click away.
         self.cropping = true;
         self.crop_drag = None;
+        // Only the frame: the daemon decodes one request at a time, and the
+        // rest follow from `received` rather than delaying it.
         self.request_frame(cx);
-        self.request_edge_frames(cx);
-        self.request_estimate(cx);
-        self.fetch_thumbnails(cx);
         cx.notify();
     }
 
@@ -546,11 +545,12 @@ impl Rewind {
             crate::activate::place(x, y, width, height);
         }
         window.focus(&self.focus);
-        // Stay transparent until the first real frame lands. The window keeps
-        // its last drawn surface while hidden, so starting the fade here showed
-        // one frame of the previous overlay before the new one was drawn.
+        // Appear as soon as this show has been drawn once, without waiting
+        // for the daemon: the dimmed desktop is on screen within a frame of
+        // the hotkey, and the preview grows out of it when it lands.
         crate::activate::prepare_fade();
         crate::activate::activate();
+        crate::activate::start_fade();
 
         self.refresh(cx);
         if self.busy.is_some() && self.status.is_none() {
@@ -720,11 +720,10 @@ impl Rewind {
     /// Bounded step task that drives the entrance geometry: eighteen frames,
     /// then it stops. GPUI's `with_animation` never advanced here.
     /// A frame never arrived: show the resting layout and its error rather
-    /// than leaving an invisible window up.
+    /// than the loading state.
     fn reveal_without_frame(&mut self) {
         if self.progress == 0.0 {
             self.progress = 1.0;
-            crate::activate::start_fade();
         }
     }
 
@@ -1628,9 +1627,12 @@ impl Rewind {
                         }
                         // The entrance animates real content, so it starts when
                         // the first frame lands rather than on the placeholder.
+                        // Everything else queues behind decodes on the daemon,
+                        // so it is only asked for once the frame is here.
                         if self.progress == 0.0 {
-                            crate::activate::start_fade();
                             self.animate_in(cx);
+                            self.request_edge_frames(cx);
+                            self.request_estimate(cx);
                         }
                         // The strip is a full second of decoding on the daemon's
                         // actor; asking for it later keeps it from delaying the
@@ -2132,9 +2134,9 @@ impl Render for Rewind {
         }
         trace::render(traced);
 
-        // Windows: the window is cloaked until the first real frame is on
-        // screen. This render draws it; uncloak one frame later, once it has
-        // been presented, so the previous session's surface never shows.
+        // The window stays invisible until a fresh frame is on screen. This
+        // render draws it; reveal one frame later, once it has been presented,
+        // so the previous session's surface never shows.
         if crate::activate::take_reveal() {
             // `request_animation_frame` needs a view being rendered, which a
             // frame callback is not; `refresh` asks for the next frame without.
@@ -2297,6 +2299,13 @@ impl Render for Rewind {
                                 .w(px(image_width))
                                 .h(px(image_height)),
                         )
+                        // The overlay opens onto the desktop under the loading
+                        // scrim; the frame arrives covering it, so it starts
+                        // under the same dim and brightens as it settles.
+                        .when(eased < 1.0, |this| {
+                            let tint = (SCRIM_LOADING_ALPHA * (1.0 - eased) * 255.0).round() as u32;
+                            this.child(shade_rect(0.0, 0.0, image_width, image_height, rgba(SCRIM << 8 | tint)))
+                        })
                         .when_some(overlay, |this, overlay| {
                             this.child(
                                 div()

@@ -1,4 +1,3 @@
-import Accelerate
 import CoreMedia
 import CoreVideo
 import Foundation
@@ -11,6 +10,7 @@ enum PreviewError: Error, CustomStringConvertible {
     case sessionFailed(OSStatus)
     case decodeFailed(OSStatus)
     case imageCreationFailed
+    case scaleFailed(OSStatus)
 
     var description: String {
         switch self {
@@ -19,6 +19,7 @@ enum PreviewError: Error, CustomStringConvertible {
         case .sessionFailed(let status): return "VTDecompressionSessionCreate failed (\(status))"
         case .decodeFailed(let status): return "VTDecompressionSessionDecodeFrame failed (\(status))"
         case .imageCreationFailed: return "could not read the decoded pixel buffer"
+        case .scaleFailed(let status): return "VTPixelTransferSession failed (\(status))"
         }
     }
 }
@@ -36,10 +37,14 @@ final class PreviewEngine {
     private var decodedTime: CMTime?
     private var decodedBuffer: CVPixelBuffer?
     private var decodedStatus: OSStatus = noErr
+    private var transfer: VTPixelTransferSession?
 
     deinit {
         if let session {
             VTDecompressionSessionInvalidate(session)
+        }
+        if let transfer {
+            VTPixelTransferSessionInvalidate(transfer)
         }
     }
 
@@ -218,47 +223,46 @@ final class PreviewEngine {
         return RawImage(width: width, height: height, pixels: pixels)
     }
 
-    /// vImage rather than CoreGraphics: drawing an 8 MP frame into a CGContext
-    /// costs more than transferring it at full size, which defeats the point of
-    /// scaling down. Accelerate does it in a couple of milliseconds.
+    /// The media engine's scaler rather than vImage: a Lanczos pass over a 5K
+    /// frame took ~20 ms at preview size and ~45 ms per thumbnail on the CPU,
+    /// which made the thumbnail strip hold the recorder for a second. Area
+    /// averaging keeps text as legible as Lanczos did, in ~3 ms at any size.
     private func scaledCopy(_ buffer: CVPixelBuffer, width: Int, height: Int) throws -> RawImage {
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-
-        guard let base = CVPixelBufferGetBaseAddress(buffer) else {
-            throw PreviewError.imageCreationFailed
-        }
-
         let sourceWidth = CVPixelBufferGetWidth(buffer)
         let sourceHeight = CVPixelBufferGetHeight(buffer)
         let scale = Double(width) / Double(sourceWidth)
         let scaledHeight = max(1, Int((Double(sourceHeight) * scale).rounded()))
-        let destinationRow = width * 4
 
-        var pixels = Data(count: destinationRow * scaledHeight)
-        var source = vImage_Buffer(
-            data: base,
-            height: vImagePixelCount(sourceHeight),
-            width: vImagePixelCount(sourceWidth),
-            rowBytes: CVPixelBufferGetBytesPerRow(buffer)
+        var scaled: CVPixelBuffer?
+        let created = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            scaledHeight,
+            kCVPixelFormatType_32BGRA,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary] as CFDictionary,
+            &scaled
         )
+        guard created == kCVReturnSuccess, let scaled else { throw PreviewError.imageCreationFailed }
 
-        let error: vImage_Error = pixels.withUnsafeMutableBytes { raw in
-            var destination = vImage_Buffer(
-                data: raw.baseAddress,
-                height: vImagePixelCount(scaledHeight),
-                width: vImagePixelCount(width),
-                rowBytes: destinationRow
-            )
-            return vImageScale_ARGB8888(
-                &source,
-                &destination,
-                nil,
-                vImage_Flags(kvImageHighQualityResampling)
-            )
-        }
-        guard error == kvImageNoError else { throw PreviewError.imageCreationFailed }
+        let status = VTPixelTransferSessionTransferImage(try scaler(), from: buffer, to: scaled)
+        guard status == noErr else { throw PreviewError.scaleFailed(status) }
+        return try tightCopy(scaled, width: width, height: scaledHeight)
+    }
 
-        return RawImage(width: width, height: scaledHeight, pixels: pixels)
+    private func scaler() throws -> VTPixelTransferSession {
+        if let transfer { return transfer }
+        var created: VTPixelTransferSession?
+        let status = VTPixelTransferSessionCreate(
+            allocator: kCFAllocatorDefault,
+            pixelTransferSessionOut: &created
+        )
+        guard status == noErr, let created else { throw PreviewError.scaleFailed(status) }
+        VTSessionSetProperty(
+            created,
+            key: kVTPixelTransferPropertyKey_DownsamplingMode,
+            value: kVTDownsamplingMode_Average
+        )
+        transfer = created
+        return created
     }
 }
